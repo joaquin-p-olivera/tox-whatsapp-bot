@@ -28,6 +28,8 @@ let bob: FakePeer
 const apiRequests: Record<string, unknown>[] = []
 const audioRequests: { url: string; apiKey?: string }[] = []
 const FAKE_M4A = Buffer.from('not-really-an-m4a-but-bytes-are-bytes'.repeat(20))
+const FAKE_WEBP = Buffer.from('not-really-a-webp-but-bytes-are-bytes'.repeat(10))
+const stickerRequests: { url: string; apiKey?: string }[] = []
 
 before(async () => {
     // Stub of the Tox API: "!ping" -> pong, "!m" -> mentions the first participant it was given,
@@ -38,6 +40,13 @@ before(async () => {
             audioRequests.push({ url: req.url, apiKey: req.headers['x-api-key'] as string | undefined })
             res.setHeader('content-type', req.url.endsWith('.ogg') ? 'audio/ogg; codecs=opus' : 'audio/mp4')
             res.end(FAKE_M4A)
+            return
+        }
+        // GET /api/v1/stickers/<id>: serve a fake webp
+        if (req.method === 'GET' && req.url?.startsWith('/api/v1/stickers/')) {
+            stickerRequests.push({ url: req.url, apiKey: req.headers['x-api-key'] as string | undefined })
+            res.setHeader('content-type', 'image/webp')
+            res.end(FAKE_WEBP)
             return
         }
         let raw = ''
@@ -57,6 +66,10 @@ before(async () => {
             }
             if (body.text === '!audio') {
                 res.end(JSON.stringify({ replies: [{ text: '', mentions: [], audio: 'risa.m4a' }] }))
+                return
+            }
+            if (body.text?.startsWith('!sticker')) {
+                res.end(JSON.stringify({ replies: [{ text: '', mentions: [], sticker: 'generated-id' }] }))
                 return
             }
             if (body.text === '!m') {
@@ -167,4 +180,15 @@ test('an Ogg/Opus audio reply is delivered as a voice note (ptt)', async () => {
     assert.ok(audio, 'Bob received an audioMessage')
     assert.equal(audio.ptt, true, 'Ogg/Opus goes out as a voice note')
     assert.match(String(audio.mimetype), /^audio\/ogg/)
+})
+
+test('a sticker reply: downloads it from the API and delivers it to the group', async () => {
+    await alice.sendGroupConversation(GROUP, '!sticker hola')
+    const reply = await bob.expectGroupMessage(GROUP, { senderJid: BOT, timeoutMs: 15_000 })
+
+    assert.deepEqual(stickerRequests.map((r) => [r.url, r.apiKey]), [['/api/v1/stickers/generated-id', 'e2e-key']])
+    const sticker = reply.message.stickerMessage
+    assert.ok(sticker, 'Bob received a stickerMessage')
+    assert.equal(sticker.mimetype, 'image/webp')
+    assert.equal(Number(sticker.fileLength), FAKE_WEBP.length)
 })

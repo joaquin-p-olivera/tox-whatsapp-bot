@@ -10,7 +10,7 @@ import {
     type GroupMember,
     type SendOptions
 } from '../src/messageHandler.ts'
-import type { ToxAudio, ToxMessage, ToxReply } from '../src/toxClient.ts'
+import type { ToxAudio, ToxMessage, ToxReply, ToxSticker } from '../src/toxClient.ts'
 import { makeConfig, makeMessage, silentLogger } from './helpers.ts'
 
 const plain = (text: string): ToxReply => ({ text, mentions: [] })
@@ -21,6 +21,7 @@ interface SetupOptions {
     fail?: boolean
     members?: GroupMember[] | Error
     audioFails?: boolean
+    stickerFails?: boolean
 }
 
 function setup(options: SetupOptions = {}) {
@@ -28,6 +29,8 @@ function setup(options: SetupOptions = {}) {
     const sent: { jid: string; text: string; options: SendOptions | undefined }[] = []
     const audiosFetched: string[] = []
     const audiosSent: { jid: string; audio: ToxAudio; options: SendOptions | undefined }[] = []
+    const stickersFetched: string[] = []
+    const stickersSent: { jid: string; sticker: ToxSticker; options: SendOptions | undefined }[] = []
     const { members } = options
     const handle = createMessageHandler({
         config: makeConfig(options.config),
@@ -42,6 +45,11 @@ function setup(options: SetupOptions = {}) {
                 audiosFetched.push(name)
                 if (options.audioFails) throw new Error('audio 404')
                 return { data: new Uint8Array([1, 2, 3]), mimetype: 'audio/mp4' }
+            },
+            async fetchSticker(id) {
+                stickersFetched.push(id)
+                if (options.stickerFails) throw new Error('sticker 404')
+                return { data: new Uint8Array([4, 5, 6]), mimetype: 'image/webp' }
             }
         },
         getGroupMembers: members
@@ -55,9 +63,12 @@ function setup(options: SetupOptions = {}) {
         },
         async sendAudio(jid, audio, sendOptions) {
             audiosSent.push({ jid, audio, options: sendOptions })
+        },
+        async sendSticker(jid, sticker, sendOptions) {
+            stickersSent.push({ jid, sticker, options: sendOptions })
         }
     })
-    return { handle, apiCalls, sent, audiosFetched, audiosSent }
+    return { handle, apiCalls, sent, audiosFetched, audiosSent, stickersFetched, stickersSent }
 }
 
 const member = (id: string, extra: Partial<GroupMember> = {}): GroupMember => ({ userId: id, aliases: [id], ...extra })
@@ -157,11 +168,16 @@ test('a failing send does not throw', async () => {
     const handle = createMessageHandler({
         config: makeConfig(),
         logger: silentLogger,
-        tox: { sendMessage: async () => [plain('a'), plain('b')], fetchAudio: async () => ({ data: new Uint8Array(), mimetype: 'audio/mp4' }) },
+        tox: {
+            sendMessage: async () => [plain('a'), plain('b')],
+            fetchAudio: async () => ({ data: new Uint8Array(), mimetype: 'audio/mp4' }),
+            fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' })
+        },
         sendText: async () => {
             throw new Error('socket closed')
         },
-        sendAudio: async () => {}
+        sendAudio: async () => {},
+        sendSticker: async () => {}
     })
     await assert.doesNotReject(handle(makeMessage()))
 })
@@ -238,10 +254,15 @@ test('warns when the group has nobody to mention besides the sender', async () =
     const handle = createMessageHandler({
         config: makeConfig(),
         logger: { ...silentLogger, warn: (message) => void warnings.push(message) },
-        tox: { sendMessage: async () => [plain('ok')], fetchAudio: async () => ({ data: new Uint8Array(), mimetype: 'audio/mp4' }) },
+        tox: {
+            sendMessage: async () => [plain('ok')],
+            fetchAudio: async () => ({ data: new Uint8Array(), mimetype: 'audio/mp4' }),
+            fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' })
+        },
         getGroupMembers: async () => [member('198765432100@lid')], // only the sender (the bot is already excluded)
         sendText: async () => {},
-        sendAudio: async () => {}
+        sendAudio: async () => {},
+        sendSticker: async () => {}
     })
     await handle(makeMessage({ text: '!m' }))
     assert.equal(warnings.length, 1)
@@ -277,10 +298,12 @@ test('if the audio cannot be downloaded, it logs and sends nothing (no crash, no
             sendMessage: async (m) => (apiCalls.push(m), [{ text: '', mentions: [], audio: 'risa.m4a' }]),
             fetchAudio: async () => {
                 throw new Error('404')
-            }
+            },
+            fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' })
         },
         sendText: async () => assert.fail('nothing should be sent'),
-        sendAudio: async () => assert.fail('nothing should be sent')
+        sendAudio: async () => assert.fail('nothing should be sent'),
+        sendSticker: async () => assert.fail('nothing should be sent')
     })
     await assert.doesNotReject(handle(makeMessage({ text: '!m' })))
     assert.deepEqual(errors, ['Failed to send reply'])
@@ -295,4 +318,44 @@ test('sends every alias of a member (LID and phone number) so the API can match 
     })
     await handle(makeMessage({ text: '!m' }))
     assert.deepEqual(apiCalls[0]?.participants?.[0]?.aliases, ['59899222222@s.whatsapp.net', '222@lid'])
+})
+
+test('a sticker reply downloads the sticker and sends it, quoting the command', async () => {
+    const { handle, sent, stickersFetched, stickersSent } = setup({ replies: [{ text: '', mentions: [], sticker: 'abc123' }] })
+    const message = makeMessage({ text: '!sticker hola' })
+    await handle(message)
+
+    assert.deepEqual(stickersFetched, ['abc123'])
+    assert.equal(stickersSent.length, 1)
+    assert.deepEqual([...(stickersSent[0]?.sticker.data ?? [])], [4, 5, 6])
+    assert.equal(stickersSent[0]?.sticker.mimetype, 'image/webp')
+    assert.equal(stickersSent[0]?.options?.quoteRef, message.quoteRef)
+    assert.equal(sent.length, 0, 'no text is sent along with a pure sticker reply')
+})
+
+test('a text reply never touches the sticker endpoint', async () => {
+    const { handle, stickersFetched, stickersSent } = setup()
+    await handle(makeMessage())
+    assert.equal(stickersFetched.length + stickersSent.length, 0)
+})
+
+test('if the sticker cannot be downloaded, it logs and sends nothing (no crash, no broken message)', async () => {
+    const errors: string[] = []
+    const apiCalls: ToxMessage[] = []
+    const handle = createMessageHandler({
+        config: makeConfig(),
+        logger: { ...silentLogger, error: (m) => void errors.push(m) },
+        tox: {
+            sendMessage: async (m) => (apiCalls.push(m), [{ text: '', mentions: [], sticker: 'abc123' }]),
+            fetchAudio: async () => ({ data: new Uint8Array(), mimetype: 'audio/mp4' }),
+            fetchSticker: async () => {
+                throw new Error('404')
+            }
+        },
+        sendText: async () => assert.fail('nothing should be sent'),
+        sendAudio: async () => assert.fail('nothing should be sent'),
+        sendSticker: async () => assert.fail('nothing should be sent')
+    })
+    await assert.doesNotReject(handle(makeMessage({ text: '!sticker hola' })))
+    assert.deepEqual(errors, ['Failed to send reply'])
 })

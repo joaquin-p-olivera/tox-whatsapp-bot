@@ -79,3 +79,30 @@ test('a reply with an audio keeps its name', async () => {
     const client = new ToxClient('http://api', 'k', 1000, async () => jsonResponse({ replies: [{ text: '', mentions: [], audio: 'risa.m4a' }] }))
     assert.deepEqual(await client.sendMessage(message), [{ text: '', mentions: [], audio: 'risa.m4a' }])
 })
+
+test('a reply with a sticker keeps its id', async () => {
+    const client = new ToxClient('http://api', 'k', 1000, async () => jsonResponse({ replies: [{ text: '', mentions: [], sticker: 'abc123' }] }))
+    assert.deepEqual(await client.sendMessage(message), [{ text: '', mentions: [], sticker: 'abc123' }])
+})
+
+test('fetchSticker downloads the bytes with the API key and returns the mimetype', async () => {
+    let seen: { url: string; init: RequestInit } | undefined
+    const client = new ToxClient('http://api', 'secret', 1000, async (url, init) => {
+        seen = { url: String(url), init: init as RequestInit }
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/webp' } })
+    })
+    const sticker = await client.fetchSticker('abc 123')
+    assert.deepEqual([...sticker.data], [1, 2, 3])
+    assert.equal(sticker.mimetype, 'image/webp')
+    assert.equal(seen?.url, 'http://api/api/v1/stickers/abc%20123', 'the id is URL-encoded')
+    assert.equal((seen?.init.headers as Record<string, string>)['x-api-key'], 'secret')
+})
+
+test('fetchSticker turns 404s and network failures into ToxApiError', async () => {
+    const notFound = new ToxClient('http://api', 'k', 1000, async () => new Response('{}', { status: 404 }))
+    await assert.rejects(notFound.fetchSticker('x'), (e) => e instanceof ToxApiError && /404/.test(e.message))
+    const down = new ToxClient('http://api', 'k', 1000, async () => {
+        throw new TypeError('fetch failed')
+    })
+    await assert.rejects(down.fetchSticker('x'), ToxApiError)
+})

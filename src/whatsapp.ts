@@ -13,7 +13,7 @@ export interface BotOptions {
     clientOptions?: Partial<WaClientOptions>
     /** Replaces the persistent SQLite store (tests use an in-memory one). */
     store?: WaStore
-    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio'>
+    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker'>
 }
 
 export interface Bot {
@@ -120,6 +120,13 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
                 chatJid,
                 // Ogg/Opus is what WhatsApp shows as a voice note; m4a/mp3 go out as plain audio files.
                 { type: 'audio', media: data, mimetype, ptt: mimetype.includes('ogg') },
+                quoteRef ? { quote: quoteRef as WaIncomingMessageEvent } : undefined
+            )
+        },
+        sendSticker: async (chatJid, { data, mimetype }, { quoteRef } = {}) => {
+            await client.message.send(
+                chatJid,
+                { type: 'sticker', media: data, mimetype },
                 quoteRef ? { quote: quoteRef as WaIncomingMessageEvent } : undefined
             )
         },
