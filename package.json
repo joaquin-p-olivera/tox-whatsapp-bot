@@ -1,0 +1,26 @@
+{
+  "name": "tox-whatsapp-bot",
+  "version": "0.1.0",
+  "description": "WhatsApp front-end for the Tox API: forwards chat messages and sends back the replies.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node src/index.ts",
+    "dev": "node --watch src/index.ts",
+    "start:prod": "APP_ENV=prod node src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@zapo-js/store-sqlite": "1.3.0",
+    "zapo-js": "1.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "@zapo-js/fake-server": "1.3.0",
+    "typescript": "7.0.2"
+  }
+}

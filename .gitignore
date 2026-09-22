@@ -1,0 +1,12 @@
+node_modules/
+
+# Environment files: only the .env.default template is tracked
+.env
+.env.*
+!.env.default
+
+# WhatsApp session: holds the account's encryption keys. Never commit it.
+.auth/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
