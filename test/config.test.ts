@@ -15,6 +15,7 @@ test('applies defaults', () => {
     assert.deepEqual([...config.commandPrefixes], ['!', '/'])
     assert.equal(config.allowedGroupJids.size, 0)
     assert.equal(config.botPhoneNumber, null)
+    assert.equal(config.alertsPollIntervalMs, 30_000)
 })
 
 test('normalises the phone number to digits', () => {
@@ -41,4 +42,5 @@ test('rejects bad booleans, log levels and timeouts', () => {
     assert.throws(() => loadConfig({ TOX_API_KEY: 'k', ALLOW_PRIVATE_CHATS: 'maybe' }), /ALLOW_PRIVATE_CHATS/)
     assert.throws(() => loadConfig({ TOX_API_KEY: 'k', LOG_LEVEL: 'loud' }), /LOG_LEVEL/)
     assert.throws(() => loadConfig({ TOX_API_KEY: 'k', TOX_API_TIMEOUT_MS: '-5' }), /TOX_API_TIMEOUT_MS/)
+    assert.throws(() => loadConfig({ TOX_API_KEY: 'k', ALERTS_POLL_INTERVAL_MS: '-5' }), /ALERTS_POLL_INTERVAL_MS/)
 })

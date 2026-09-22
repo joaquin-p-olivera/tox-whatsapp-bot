@@ -13,6 +13,7 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
         allowPrivateChats: false,
         commandPrefixes: ['!', '/'],
         logLevel: 'error',
+        alertsPollIntervalMs: 30_000,
         ...overrides
     }
 }

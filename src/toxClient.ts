@@ -38,6 +38,14 @@ export interface ToxSticker {
     mimetype: string
 }
 
+/** A proactive message the bot must send on its own, with no user message behind it.
+ * `{@0}`, `{@1}`... in `text` stand for `mentions[0]`, `mentions[1]`..., same as ToxReply. */
+export interface PendingAlert {
+    chat_id: string
+    text: string
+    mentions: ToxParticipant[]
+}
+
 export class ToxApiError extends Error {}
 
 interface ToxResponse {
@@ -95,6 +103,13 @@ export class ToxClient {
     async fetchSticker(id: string): Promise<ToxSticker> {
         const response = await this.get(`/api/v1/stickers/${encodeURIComponent(id)}`, `sticker "${id}"`)
         return { data: new Uint8Array(await response.arrayBuffer()), mimetype: response.headers.get('content-type') ?? 'image/webp' }
+    }
+
+    /** Alerts queued for this platform (e.g. by the API's background !service health check).
+     * Fetch-and-delete on the API side: each call only ever returns new ones. */
+    async fetchPendingAlerts(): Promise<PendingAlert[]> {
+        const response = await this.get('/api/v1/alerts/pending?platform=whatsapp', 'pending alerts')
+        return (await response.json()) as PendingAlert[]
     }
 
     private async get(path: string, what: string): Promise<Response> {

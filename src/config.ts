@@ -13,6 +13,8 @@ export interface Config {
     allowPrivateChats: boolean
     commandPrefixes: readonly string[]
     logLevel: 'trace' | 'debug' | 'info' | 'warn' | 'error'
+    /** How often the bot checks the API for proactive alerts (e.g. a !service health change) to send on its own. */
+    alertsPollIntervalMs: number
 }
 
 const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error'] as const
@@ -64,6 +66,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         throw new Error(`TOX_API_TIMEOUT_MS must be a positive integer, got "${env.TOX_API_TIMEOUT_MS}"`)
     }
 
+    const alertsPollIntervalMs = Number(env.ALERTS_POLL_INTERVAL_MS || 30_000)
+    if (!Number.isInteger(alertsPollIntervalMs) || alertsPollIntervalMs <= 0) {
+        throw new Error(`ALERTS_POLL_INTERVAL_MS must be a positive integer, got "${env.ALERTS_POLL_INTERVAL_MS}"`)
+    }
+
     return {
         toxApiUrl: (env.TOX_API_URL?.trim() || 'http://127.0.0.1:8000').replace(/\/+$/, ''),
         toxApiKey,
@@ -74,6 +81,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         allowedGroupJids: new Set(list(env.ALLOWED_GROUP_JIDS)),
         allowPrivateChats: parseBoolean('ALLOW_PRIVATE_CHATS', env.ALLOW_PRIVATE_CHATS, false),
         commandPrefixes: list(env.COMMAND_PREFIXES ?? '!,/'),
-        logLevel
+        logLevel,
+        alertsPollIntervalMs
     }
 }

@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { Config } from './config.ts'
-import { createMessageHandler, stripDevice, type ChatMessage, type GroupMember, type HandlerLogger } from './messageHandler.ts'
+import { createMessageHandler, renderMentions, stripDevice, type ChatMessage, type GroupMember, type HandlerLogger } from './messageHandler.ts'
 import { createPairingController } from './pairing.ts'
 import { ToxClient } from './toxClient.ts'
 
@@ -13,7 +13,7 @@ export interface BotOptions {
     clientOptions?: Partial<WaClientOptions>
     /** Replaces the persistent SQLite store (tests use an in-memory one). */
     store?: WaStore
-    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker'>
+    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchPendingAlerts'>
 }
 
 export interface Bot {
@@ -195,11 +195,28 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
         void reconnect()
     })
 
+    let alertsTimer: NodeJS.Timeout | undefined
+    async function pollAlerts(): Promise<void> {
+        try {
+            for (const alert of await tox.fetchPendingAlerts()) {
+                const { text, mentionJids } = renderMentions({ text: alert.text, mentions: alert.mentions })
+                await client.message.send(alert.chat_id, text, mentionJids.length ? { mentions: mentionJids } : undefined)
+            }
+        } catch (error) {
+            logger.error('Could not poll pending alerts', { error: String(error) })
+        }
+    }
+
     return {
         client,
-        connect: () => client.connect(),
+        async connect() {
+            await client.connect()
+            // Proactive alerts (e.g. !service health changes): checked on our own timer, no user message involved.
+            alertsTimer = setInterval(() => void pollAlerts(), config.alertsPollIntervalMs)
+        },
         async stop() {
             stopping = true
+            clearInterval(alertsTimer)
             await client.disconnect()
         }
     }

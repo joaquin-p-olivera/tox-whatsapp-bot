@@ -106,3 +106,15 @@ test('fetchSticker turns 404s and network failures into ToxApiError', async () =
     })
     await assert.rejects(down.fetchSticker('x'), ToxApiError)
 })
+
+test('fetchPendingAlerts requests this platform and returns the alerts', async () => {
+    let seen: string | undefined
+    const client = new ToxClient('http://api', 'secret', 1000, async (url) => {
+        seen = String(url)
+        return jsonResponse([{ chat_id: 'g@g.us', text: '🔴 demo: caído. {@0}', mentions: [{ user_id: '1@lid' }] }])
+    })
+    assert.deepEqual(await client.fetchPendingAlerts(), [
+        { chat_id: 'g@g.us', text: '🔴 demo: caído. {@0}', mentions: [{ user_id: '1@lid' }] }
+    ])
+    assert.equal(seen, 'http://api/api/v1/alerts/pending?platform=whatsapp')
+})

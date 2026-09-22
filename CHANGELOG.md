@@ -30,3 +30,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - The pairing code was never requested on a fresh session: WhatsApp signals it with `auth_qr` first and `auth_pairing_required` only on refresh. Both now trigger the request (covered by `test/pairing.test.ts`).
+
+### Added
+
+- Proactive alerts: polls the API (`ALERTS_POLL_INTERVAL_MS`) for messages it must send with no user command
+  behind them (e.g. a local service going down or recovering) and sends each straight to its group.
