@@ -10,7 +10,7 @@ import {
     type GroupMember,
     type SendOptions
 } from '../src/messageHandler.ts'
-import type { ToxAudio, ToxMessage, ToxReply, ToxSticker } from '../src/toxClient.ts'
+import type { ToxAudio, ToxImage, ToxMessage, ToxReply, ToxSticker } from '../src/toxClient.ts'
 import { makeConfig, makeMessage, silentLogger } from './helpers.ts'
 
 const plain = (text: string): ToxReply => ({ text, mentions: [] })
@@ -22,6 +22,7 @@ interface SetupOptions {
     members?: GroupMember[] | Error
     audioFails?: boolean
     stickerFails?: boolean
+    imageFails?: boolean
 }
 
 function setup(options: SetupOptions = {}) {
@@ -31,6 +32,8 @@ function setup(options: SetupOptions = {}) {
     const audiosSent: { jid: string; audio: ToxAudio; options: SendOptions | undefined }[] = []
     const stickersFetched: string[] = []
     const stickersSent: { jid: string; sticker: ToxSticker; options: SendOptions | undefined }[] = []
+    const imagesFetched: string[] = []
+    const imagesSent: { jid: string; image: ToxImage; options: SendOptions | undefined }[] = []
     const { members } = options
     const handle = createMessageHandler({
         config: makeConfig(options.config),
@@ -50,6 +53,11 @@ function setup(options: SetupOptions = {}) {
                 stickersFetched.push(id)
                 if (options.stickerFails) throw new Error('sticker 404')
                 return { data: new Uint8Array([4, 5, 6]), mimetype: 'image/webp' }
+            },
+            async fetchImage(id) {
+                imagesFetched.push(id)
+                if (options.imageFails) throw new Error('image 404')
+                return { data: new Uint8Array([7, 8, 9]), mimetype: 'image/png' }
             }
         },
         getGroupMembers: members
@@ -66,9 +74,12 @@ function setup(options: SetupOptions = {}) {
         },
         async sendSticker(jid, sticker, sendOptions) {
             stickersSent.push({ jid, sticker, options: sendOptions })
+        },
+        async sendImage(jid, image, sendOptions) {
+            imagesSent.push({ jid, image, options: sendOptions })
         }
     })
-    return { handle, apiCalls, sent, audiosFetched, audiosSent, stickersFetched, stickersSent }
+    return { handle, apiCalls, sent, audiosFetched, audiosSent, stickersFetched, stickersSent, imagesFetched, imagesSent }
 }
 
 const member = (id: string, extra: Partial<GroupMember> = {}): GroupMember => ({ userId: id, aliases: [id], ...extra })
@@ -171,13 +182,15 @@ test('a failing send does not throw', async () => {
         tox: {
             sendMessage: async () => [plain('a'), plain('b')],
             fetchAudio: async () => ({ data: new Uint8Array(), mimetype: 'audio/mp4' }),
-            fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' })
+            fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' }),
+            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' })
         },
         sendText: async () => {
             throw new Error('socket closed')
         },
         sendAudio: async () => {},
-        sendSticker: async () => {}
+        sendSticker: async () => {},
+        sendImage: async () => {}
     })
     await assert.doesNotReject(handle(makeMessage()))
 })
@@ -257,12 +270,14 @@ test('warns when the group has nobody to mention besides the sender', async () =
         tox: {
             sendMessage: async () => [plain('ok')],
             fetchAudio: async () => ({ data: new Uint8Array(), mimetype: 'audio/mp4' }),
-            fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' })
+            fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' }),
+            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' })
         },
         getGroupMembers: async () => [member('198765432100@lid')], // only the sender (the bot is already excluded)
         sendText: async () => {},
         sendAudio: async () => {},
-        sendSticker: async () => {}
+        sendSticker: async () => {},
+        sendImage: async () => {}
     })
     await handle(makeMessage({ text: '!m' }))
     assert.equal(warnings.length, 1)
@@ -299,11 +314,13 @@ test('if the audio cannot be downloaded, it logs and sends nothing (no crash, no
             fetchAudio: async () => {
                 throw new Error('404')
             },
-            fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' })
+            fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' }),
+            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' })
         },
         sendText: async () => assert.fail('nothing should be sent'),
         sendAudio: async () => assert.fail('nothing should be sent'),
-        sendSticker: async () => assert.fail('nothing should be sent')
+        sendSticker: async () => assert.fail('nothing should be sent'),
+        sendImage: async () => assert.fail('nothing should be sent')
     })
     await assert.doesNotReject(handle(makeMessage({ text: '!m' })))
     assert.deepEqual(errors, ['Failed to send reply'])
@@ -339,6 +356,47 @@ test('a text reply never touches the sticker endpoint', async () => {
     assert.equal(stickersFetched.length + stickersSent.length, 0)
 })
 
+test('an image reply downloads it and sends it, quoting the command', async () => {
+    const { handle, sent, imagesFetched, imagesSent } = setup({ replies: [{ text: '', mentions: [], image: 'tabla123' }] })
+    const message = makeMessage({ text: '!futbol argentina -t' })
+    await handle(message)
+
+    assert.deepEqual(imagesFetched, ['tabla123'])
+    assert.equal(imagesSent.length, 1)
+    assert.deepEqual([...(imagesSent[0]?.image.data ?? [])], [7, 8, 9])
+    assert.equal(imagesSent[0]?.image.mimetype, 'image/png')
+    assert.equal(imagesSent[0]?.options?.quoteRef, message.quoteRef)
+    assert.equal(sent.length, 0, 'no text is sent along with a pure image reply')
+})
+
+test('a text reply never touches the image endpoint', async () => {
+    const { handle, imagesFetched, imagesSent } = setup()
+    await handle(makeMessage())
+    assert.equal(imagesFetched.length + imagesSent.length, 0)
+})
+
+test('if the image cannot be downloaded, it logs and sends nothing (no crash, no broken message)', async () => {
+    const errors: string[] = []
+    const handle = createMessageHandler({
+        config: makeConfig(),
+        logger: { ...silentLogger, error: (m) => void errors.push(m) },
+        tox: {
+            sendMessage: async () => [{ text: '', mentions: [], image: 'tabla123' }],
+            fetchAudio: async () => ({ data: new Uint8Array(), mimetype: 'audio/mp4' }),
+            fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' }),
+            fetchImage: async () => {
+                throw new Error('404')
+            }
+        },
+        sendText: async () => assert.fail('nothing should be sent'),
+        sendAudio: async () => assert.fail('nothing should be sent'),
+        sendSticker: async () => assert.fail('nothing should be sent'),
+        sendImage: async () => assert.fail('nothing should be sent')
+    })
+    await assert.doesNotReject(handle(makeMessage({ text: '!futbol argentina -t' })))
+    assert.deepEqual(errors, ['Failed to send reply'])
+})
+
 test('if the sticker cannot be downloaded, it logs and sends nothing (no crash, no broken message)', async () => {
     const errors: string[] = []
     const apiCalls: ToxMessage[] = []
@@ -350,11 +408,13 @@ test('if the sticker cannot be downloaded, it logs and sends nothing (no crash, 
             fetchAudio: async () => ({ data: new Uint8Array(), mimetype: 'audio/mp4' }),
             fetchSticker: async () => {
                 throw new Error('404')
-            }
+            },
+            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' })
         },
         sendText: async () => assert.fail('nothing should be sent'),
         sendAudio: async () => assert.fail('nothing should be sent'),
-        sendSticker: async () => assert.fail('nothing should be sent')
+        sendSticker: async () => assert.fail('nothing should be sent'),
+        sendImage: async () => assert.fail('nothing should be sent')
     })
     await assert.doesNotReject(handle(makeMessage({ text: '!sticker hola' })))
     assert.deepEqual(errors, ['Failed to send reply'])

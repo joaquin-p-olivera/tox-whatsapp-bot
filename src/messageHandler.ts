@@ -1,5 +1,5 @@
 import type { Config } from './config.ts'
-import { ToxApiError, type ToxAudio, type ToxClient, type ToxParticipant, type ToxReply, type ToxSticker } from './toxClient.ts'
+import { ToxApiError, type ToxAudio, type ToxClient, type ToxImage, type ToxParticipant, type ToxReply, type ToxSticker } from './toxClient.ts'
 
 /** A chat message, normalised so this module knows nothing about the WhatsApp library. */
 export interface ChatMessage {
@@ -30,6 +30,7 @@ export interface SendOptions {
 export type SendText = (chatJid: string, text: string, options?: SendOptions) => Promise<void>
 export type SendAudio = (chatJid: string, audio: ToxAudio, options?: SendOptions) => Promise<void>
 export type SendSticker = (chatJid: string, sticker: ToxSticker, options?: SendOptions) => Promise<void>
+export type SendImage = (chatJid: string, image: ToxImage, options?: SendOptions) => Promise<void>
 export type GetGroupMembers = (chatJid: string) => Promise<GroupMember[]>
 
 export interface HandlerLogger {
@@ -43,10 +44,11 @@ export const API_DOWN_REPLY = '⚠️ Tox no está disponible en este momento. P
 
 interface Deps {
     config: Config
-    tox: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker'>
+    tox: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage'>
     sendText: SendText
     sendAudio: SendAudio
     sendSticker: SendSticker
+    sendImage: SendImage
     logger: HandlerLogger
     /** Optional: lets the API pick a random member. Failures are tolerated. */
     getGroupMembers?: GetGroupMembers
@@ -74,7 +76,7 @@ export function renderMentions(reply: ToxReply): { text: string; mentionJids: st
     return { text, mentionJids }
 }
 
-export function createMessageHandler({ config, tox, sendText, sendAudio, sendSticker, logger, getGroupMembers }: Deps) {
+export function createMessageHandler({ config, tox, sendText, sendAudio, sendSticker, sendImage, logger, getGroupMembers }: Deps) {
     const startsWithPrefix = (text: string) => config.commandPrefixes.some((prefix) => text.startsWith(prefix))
 
     async function listParticipants(message: ChatMessage, senderId: string): Promise<ToxParticipant[] | undefined> {
@@ -138,13 +140,16 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         for (const [index, reply] of replies.entries()) {
             // Only the first reply quotes the command, so multi-part answers stay readable.
             const quoteRef = index === 0 ? message.quoteRef : undefined
-            const hasMedia = Boolean(reply.audio) || Boolean(reply.sticker)
+            const hasMedia = Boolean(reply.audio) || Boolean(reply.sticker) || Boolean(reply.image)
             try {
                 if (reply.audio) {
                     await sendAudio(message.chatJid, await tox.fetchAudio(reply.audio), { quoteRef })
                 }
                 if (reply.sticker) {
                     await sendSticker(message.chatJid, await tox.fetchSticker(reply.sticker), { quoteRef })
+                }
+                if (reply.image) {
+                    await sendImage(message.chatJid, await tox.fetchImage(reply.image), { quoteRef })
                 }
                 if (reply.text) {
                     const { text: body, mentionJids } = renderMentions(reply)

@@ -35,3 +35,5 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Proactive alerts: polls the API (`ALERTS_POLL_INTERVAL_MS`) for messages it must send with no user command
   behind them (e.g. a local service going down or recovering) and sends each straight to its group.
+- Image replies (`reply.image`, e.g. `!futbol -t`'s table): downloads it from the API and sends it as a
+  WhatsApp image, same pattern as audio/sticker replies.

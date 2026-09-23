@@ -24,6 +24,8 @@ export interface ToxReply {
     audio?: string
     /** Id of a generated sticker to send (download it with `fetchSticker`). Short-lived: fetch it right away. */
     sticker?: string
+    /** Id of a generated image to send (download it with `fetchImage`), e.g. !futbol -t's table. Short-lived. */
+    image?: string
 }
 
 export interface ToxAudio {
@@ -35,6 +37,12 @@ export interface ToxAudio {
 export interface ToxSticker {
     data: Uint8Array
     /** Straight from the API's Content-Type — always "image/webp" today. */
+    mimetype: string
+}
+
+export interface ToxImage {
+    data: Uint8Array
+    /** Straight from the API's Content-Type — always "image/png" today. */
     mimetype: string
 }
 
@@ -89,7 +97,8 @@ export class ToxClient {
             text: reply.text,
             mentions: reply.mentions ?? [],
             ...(reply.audio ? { audio: reply.audio } : {}),
-            ...(reply.sticker ? { sticker: reply.sticker } : {})
+            ...(reply.sticker ? { sticker: reply.sticker } : {}),
+            ...(reply.image ? { image: reply.image } : {})
         }))
     }
 
@@ -103,6 +112,12 @@ export class ToxClient {
     async fetchSticker(id: string): Promise<ToxSticker> {
         const response = await this.get(`/api/v1/stickers/${encodeURIComponent(id)}`, `sticker "${id}"`)
         return { data: new Uint8Array(await response.arrayBuffer()), mimetype: response.headers.get('content-type') ?? 'image/webp' }
+    }
+
+    /** Downloads a generated image (e.g. !futbol -t's table). Short-lived: fetch it right after the reply. */
+    async fetchImage(id: string): Promise<ToxImage> {
+        const response = await this.get(`/api/v1/images/${encodeURIComponent(id)}`, `image "${id}"`)
+        return { data: new Uint8Array(await response.arrayBuffer()), mimetype: response.headers.get('content-type') ?? 'image/png' }
     }
 
     /** Alerts queued for this platform (e.g. by the API's background !service health check).

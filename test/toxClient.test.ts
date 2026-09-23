@@ -107,6 +107,28 @@ test('fetchSticker turns 404s and network failures into ToxApiError', async () =
     await assert.rejects(down.fetchSticker('x'), ToxApiError)
 })
 
+test('fetchImage downloads the bytes with the API key and returns the mimetype', async () => {
+    let seen: { url: string; init: RequestInit } | undefined
+    const client = new ToxClient('http://api', 'secret', 1000, async (url, init) => {
+        seen = { url: String(url), init: init as RequestInit }
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/png' } })
+    })
+    const image = await client.fetchImage('tabla 123')
+    assert.deepEqual([...image.data], [1, 2, 3])
+    assert.equal(image.mimetype, 'image/png')
+    assert.equal(seen?.url, 'http://api/api/v1/images/tabla%20123', 'the id is URL-encoded')
+    assert.equal((seen?.init.headers as Record<string, string>)['x-api-key'], 'secret')
+})
+
+test('fetchImage turns 404s and network failures into ToxApiError', async () => {
+    const notFound = new ToxClient('http://api', 'k', 1000, async () => new Response('{}', { status: 404 }))
+    await assert.rejects(notFound.fetchImage('x'), (e) => e instanceof ToxApiError && /404/.test(e.message))
+    const down = new ToxClient('http://api', 'k', 1000, async () => {
+        throw new TypeError('fetch failed')
+    })
+    await assert.rejects(down.fetchImage('x'), ToxApiError)
+})
+
 test('fetchPendingAlerts requests this platform and returns the alerts', async () => {
     let seen: string | undefined
     const client = new ToxClient('http://api', 'secret', 1000, async (url) => {
