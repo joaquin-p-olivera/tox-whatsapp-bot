@@ -3,6 +3,8 @@ export interface ToxParticipant {
     user_name?: string
     /** Other IDs of the same person (LID / phone number): lets the API match mutes across both forms. */
     aliases?: string[]
+    /** True when this is the bot itself (someone tagged the bot). */
+    is_bot?: boolean
 }
 
 export interface ToxMessage {
@@ -14,6 +16,10 @@ export interface ToxMessage {
     is_group: boolean
     /** Full member list, when known. Lets the API pick a random member (e.g. for !m). */
     participants?: ToxParticipant[]
+    /** Users the sender tagged with @ in this message (e.g. for !gay). */
+    mentioned?: ToxParticipant[]
+    /** In a group: whether the sender is an administrator of THAT group (the API requires it for admin-only commands). */
+    sender_is_group_admin?: boolean
 }
 
 export interface ToxReply {
@@ -26,6 +32,8 @@ export interface ToxReply {
     sticker?: string
     /** Id of a generated image to send (download it with `fetchImage`), e.g. !futbol -t's table. Short-lived. */
     image?: string
+    /** An emoji to react to the command message with (nothing else is sent), e.g. for !uid. */
+    reaction?: string
 }
 
 export interface ToxAudio {
@@ -98,7 +106,8 @@ export class ToxClient {
             mentions: reply.mentions ?? [],
             ...(reply.audio ? { audio: reply.audio } : {}),
             ...(reply.sticker ? { sticker: reply.sticker } : {}),
-            ...(reply.image ? { image: reply.image } : {})
+            ...(reply.image ? { image: reply.image } : {}),
+            ...(reply.reaction ? { reaction: reply.reaction } : {})
         }))
     }
 

@@ -107,6 +107,11 @@ test('fetchSticker turns 404s and network failures into ToxApiError', async () =
     await assert.rejects(down.fetchSticker('x'), ToxApiError)
 })
 
+test('a reply with a reaction keeps its emoji', async () => {
+    const client = new ToxClient('http://api', 'k', 1000, async () => jsonResponse({ replies: [{ text: '', mentions: [], reaction: '👍' }] }))
+    assert.deepEqual(await client.sendMessage(message), [{ text: '', mentions: [], reaction: '👍' }])
+})
+
 test('fetchImage downloads the bytes with the API key and returns the mimetype', async () => {
     let seen: { url: string; init: RequestInit } | undefined
     const client = new ToxClient('http://api', 'secret', 1000, async (url, init) => {

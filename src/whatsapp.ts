@@ -5,6 +5,7 @@ import { join } from 'node:path'
 
 import type { Config } from './config.ts'
 import { createMessageHandler, renderMentions, stripDevice, type ChatMessage, type GroupMember, type HandlerLogger } from './messageHandler.ts'
+import { findPrivateLink } from './links.ts'
 import { createPairingController } from './pairing.ts'
 import { ToxClient } from './toxClient.ts'
 
@@ -23,8 +24,6 @@ export interface Bot {
 }
 
 const MAX_RECONNECT_ATTEMPTS = 10
-// Group rosters change rarely; refreshing at most this often avoids a query on every command.
-const GROUP_MEMBERS_TTL_MS = 5 * 60_000
 
 /** Text lives in different fields depending on the message type. */
 export function extractText(message?: Proto.IMessage | null): string | undefined {
@@ -49,6 +48,7 @@ export function toChatMessage(event: WaIncomingMessageEvent): ChatMessage | null
         senderAltJid: key.participantAlt ?? key.remoteJidAlt,
         senderName: event.pushName ?? undefined,
         text,
+        mentionedJids: [...(event.message?.extendedTextMessage?.contextInfo?.mentionedJid ?? [])],
         isGroup: key.isGroup,
         fromMe: key.fromMe,
         quoteRef: event
@@ -89,11 +89,9 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
 
     const tox = options.tox ?? new ToxClient(config.toxApiUrl, config.toxApiKey, config.toxApiTimeoutMs)
 
-    const membersCache = new Map<string, { members: GroupMember[]; fetchedAt: number }>()
+    // Deliberately NOT cached: who administers a group can change at any moment, and the API trusts this roster to
+    // decide who may run admin-only commands, so it is read from WhatsApp for every command sent in a group.
     async function getGroupMembers(chatJid: string): Promise<GroupMember[]> {
-        const cached = membersCache.get(chatJid)
-        if (cached && Date.now() - cached.fetchedAt < GROUP_MEMBERS_TTL_MS) return cached.members
-
         const credentials = client.getCredentials()
         const myIds = new Set([credentials?.meJid, credentials?.meLid].filter((id): id is string => !!id).map(stripDevice))
         const metadata = await client.group.queryGroupMetadata(chatJid)
@@ -102,11 +100,15 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
                 const ids = [participant.jid, participant.lid, participant.phoneNumber]
                     .filter((id): id is string => !!id)
                     .map(stripDevice)
-                return { userId: stripDevice(participant.jid), aliases: ids, name: participant.displayName }
+                return {
+                    userId: stripDevice(participant.jid),
+                    aliases: ids,
+                    name: participant.displayName,
+                    isAdmin: participant.isAdmin || participant.isSuperAdmin
+                }
             })
             // The bot itself is in the group but must never be mentioned.
             .filter((member) => !member.aliases.some((id) => myIds.has(id)))
-        membersCache.set(chatJid, { members, fetchedAt: Date.now() })
         return members
     }
 
@@ -115,6 +117,10 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
         tox,
         logger: logger as HandlerLogger,
         getGroupMembers,
+        getSelfJids: () => {
+            const credentials = client.getCredentials()
+            return [credentials?.meJid, credentials?.meLid].filter((id): id is string => !!id)
+        },
         sendAudio: async (chatJid, { data, mimetype }, { quoteRef } = {}) => {
             await client.message.send(
                 chatJid,
@@ -137,8 +143,15 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
                 quoteRef ? { quote: quoteRef as WaIncomingMessageEvent } : undefined
             )
         },
+        sendReaction: async (chatJid, emoji, target) => {
+            await client.message.send(chatJid, { type: 'reaction', emoji, target: target as WaIncomingMessageEvent })
+        },
         sendText: async (chatJid, text, { quoteRef, mentionJids } = {}) => {
-            await client.message.send(chatJid, text, {
+            // A URL on a private address (e.g. !fred's http://192.168.1.21:5200) only becomes tappable if the message carries
+            // it as link data, which the plain-string form never does (see links.ts): use the object form for those.
+            const link = findPrivateLink(text)
+            const content = link ? { type: 'text' as const, text, linkPreview: { matchedText: link, title: new URL(link).host } } : text
+            await client.message.send(chatJid, content, {
                 ...(quoteRef ? { quote: quoteRef as WaIncomingMessageEvent } : {}),
                 ...(mentionJids ? { mentions: mentionJids } : {})
             })

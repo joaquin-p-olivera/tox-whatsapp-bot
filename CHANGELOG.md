@@ -37,3 +37,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   behind them (e.g. a local service going down or recovering) and sends each straight to its group.
 - Image replies (`reply.image`, e.g. `!futbol -t`'s table): downloads it from the API and sends it as a
   WhatsApp image, same pattern as audio/sticker replies.
+- Reports whether the sender administers the group (`sender_is_group_admin`, from the group roster it already reads; `false` when
+  the roster can't be read), so the API can require it for admin-only commands.
+- Flags a tag of the bot itself (`is_bot` on a `mentioned` user, matching either of its own JIDs), e.g. for `!gay @bot`.
+- A URL on a private address (`http://192.168.x.x:port`, e.g. `!fred`) is now sent as link data (`matchedText` + title) so WhatsApp can make it
+  tappable. Before, every reply went out in the library's plain-string form, which never carries link data (covered by an end-to-end test).
+- Reaction replies (`reply.reaction`, e.g. `!uid`): reacts to the command message with the emoji and sends nothing else.
+- Forwards the users tagged with `@` in a message (`mentioned`), e.g. for `!gay @user`.
+- The group roster (and with it who administers the group) is no longer cached for 5 minutes: it's read from WhatsApp for every
+  command in a group, so a change of group admins applies immediately.

@@ -34,6 +34,7 @@ function setup(options: SetupOptions = {}) {
     const stickersSent: { jid: string; sticker: ToxSticker; options: SendOptions | undefined }[] = []
     const imagesFetched: string[] = []
     const imagesSent: { jid: string; image: ToxImage; options: SendOptions | undefined }[] = []
+    const reactionsSent: { jid: string; emoji: string; target: unknown }[] = []
     const { members } = options
     const handle = createMessageHandler({
         config: makeConfig(options.config),
@@ -77,9 +78,12 @@ function setup(options: SetupOptions = {}) {
         },
         async sendImage(jid, image, sendOptions) {
             imagesSent.push({ jid, image, options: sendOptions })
+        },
+        async sendReaction(jid, emoji, target) {
+            reactionsSent.push({ jid, emoji, target })
         }
     })
-    return { handle, apiCalls, sent, audiosFetched, audiosSent, stickersFetched, stickersSent, imagesFetched, imagesSent }
+    return { handle, apiCalls, sent, audiosFetched, audiosSent, stickersFetched, stickersSent, imagesFetched, imagesSent, reactionsSent }
 }
 
 const member = (id: string, extra: Partial<GroupMember> = {}): GroupMember => ({ userId: id, aliases: [id], ...extra })
@@ -97,10 +101,74 @@ test('forwards a command and quotes the original message in the reply', async ()
             user_name: 'Alice',
             text: '!ping',
             is_group: true,
-            participants: undefined
+            participants: undefined,
+            sender_is_group_admin: undefined,
+            mentioned: undefined
         }
     ])
     assert.deepEqual(sent, [{ jid: message.chatJid, text: 'pong', options: { quoteRef: message.quoteRef, mentionJids: undefined } }])
+})
+
+test('forwards the users tagged with @ in the message (device segment stripped)', async () => {
+    const { handle, apiCalls } = setup()
+    await handle(makeMessage({ text: '!gay @Bob', mentionedJids: ['111:7@lid'] }))
+    assert.deepEqual(apiCalls[0]?.mentioned, [{ user_id: '111@lid' }])
+})
+
+test('a reaction reply reacts to the command message and sends nothing else', async () => {
+    const { handle, sent, reactionsSent } = setup({ replies: [{ text: '', mentions: [], reaction: '👍' }] })
+    const message = makeMessage({ text: '!uid' })
+    await handle(message)
+    assert.deepEqual(reactionsSent, [{ jid: message.chatJid, emoji: '👍', target: message.quoteRef }])
+    assert.equal(sent.length, 0)
+})
+
+test('a tag of the bot itself is flagged as is_bot, whichever form of its JID was used', async () => {
+    const calls: ToxMessage[] = []
+    const handle = createMessageHandler({
+        config: makeConfig(),
+        logger: silentLogger,
+        tox: {
+            sendMessage: async (m) => (calls.push(m), []),
+            fetchAudio: async () => ({ data: new Uint8Array(), mimetype: 'audio/mp4' }),
+            fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' }),
+            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' })
+        },
+        getSelfJids: () => ['999:3@lid', '598000@s.whatsapp.net'],
+        sendText: async () => {},
+        sendAudio: async () => {},
+        sendSticker: async () => {},
+        sendImage: async () => {},
+        sendReaction: async () => {}
+    })
+    await handle(makeMessage({ text: '!gay @bot @Bob', mentionedJids: ['999@lid', '111@lid'] }))
+    assert.deepEqual(calls[0]?.mentioned, [{ user_id: '999@lid', is_bot: true }, { user_id: '111@lid' }])
+})
+
+test('reports whether the sender administers THIS group, by any of their JIDs', async () => {
+    const group = (senderIsAdmin: boolean) => [
+        member('198765432100@lid', { isAdmin: senderIsAdmin, aliases: ['198765432100@lid', '59899111111@s.whatsapp.net'] }),
+        member('111@lid', { isAdmin: !senderIsAdmin })
+    ]
+    const admin = setup({ members: group(true) })
+    await admin.handle(makeMessage({ text: '!service' }))
+    assert.equal(admin.apiCalls[0]?.sender_is_group_admin, true)
+
+    const notAdmin = setup({ members: group(false) })
+    await notAdmin.handle(makeMessage({ text: '!service' }))
+    assert.equal(notAdmin.apiCalls[0]?.sender_is_group_admin, false, 'someone else being admin does not count')
+})
+
+test('if the roster cannot be read, the sender is reported as NOT an admin (never guessed)', async () => {
+    const { handle, apiCalls } = setup({ members: new Error('no metadata') })
+    await handle(makeMessage({ text: '!service' }))
+    assert.equal(apiCalls[0]?.sender_is_group_admin, false)
+})
+
+test('a private chat reports nothing about group admins', async () => {
+    const { handle, apiCalls } = setup({ config: { allowPrivateChats: true }, members: [member('1@lid', { isAdmin: true })] })
+    await handle(makeMessage({ isGroup: false, chatJid: '59899123456@s.whatsapp.net', senderJid: '59899123456@s.whatsapp.net' }))
+    assert.equal(apiCalls[0]?.sender_is_group_admin, undefined)
 })
 
 test('ignores normal chatter without calling the API', async () => {
@@ -190,7 +258,8 @@ test('a failing send does not throw', async () => {
         },
         sendAudio: async () => {},
         sendSticker: async () => {},
-        sendImage: async () => {}
+        sendImage: async () => {},
+        sendReaction: async () => {}
     })
     await assert.doesNotReject(handle(makeMessage()))
 })
@@ -277,7 +346,8 @@ test('warns when the group has nobody to mention besides the sender', async () =
         sendText: async () => {},
         sendAudio: async () => {},
         sendSticker: async () => {},
-        sendImage: async () => {}
+        sendImage: async () => {},
+        sendReaction: async () => {}
     })
     await handle(makeMessage({ text: '!m' }))
     assert.equal(warnings.length, 1)
@@ -320,7 +390,8 @@ test('if the audio cannot be downloaded, it logs and sends nothing (no crash, no
         sendText: async () => assert.fail('nothing should be sent'),
         sendAudio: async () => assert.fail('nothing should be sent'),
         sendSticker: async () => assert.fail('nothing should be sent'),
-        sendImage: async () => assert.fail('nothing should be sent')
+        sendImage: async () => assert.fail('nothing should be sent'),
+        sendReaction: async () => assert.fail('nothing should be sent')
     })
     await assert.doesNotReject(handle(makeMessage({ text: '!m' })))
     assert.deepEqual(errors, ['Failed to send reply'])
@@ -391,7 +462,8 @@ test('if the image cannot be downloaded, it logs and sends nothing (no crash, no
         sendText: async () => assert.fail('nothing should be sent'),
         sendAudio: async () => assert.fail('nothing should be sent'),
         sendSticker: async () => assert.fail('nothing should be sent'),
-        sendImage: async () => assert.fail('nothing should be sent')
+        sendImage: async () => assert.fail('nothing should be sent'),
+        sendReaction: async () => assert.fail('nothing should be sent')
     })
     await assert.doesNotReject(handle(makeMessage({ text: '!futbol argentina -t' })))
     assert.deepEqual(errors, ['Failed to send reply'])
@@ -414,7 +486,8 @@ test('if the sticker cannot be downloaded, it logs and sends nothing (no crash, 
         sendText: async () => assert.fail('nothing should be sent'),
         sendAudio: async () => assert.fail('nothing should be sent'),
         sendSticker: async () => assert.fail('nothing should be sent'),
-        sendImage: async () => assert.fail('nothing should be sent')
+        sendImage: async () => assert.fail('nothing should be sent'),
+        sendReaction: async () => assert.fail('nothing should be sent')
     })
     await assert.doesNotReject(handle(makeMessage({ text: '!sticker hola' })))
     assert.deepEqual(errors, ['Failed to send reply'])

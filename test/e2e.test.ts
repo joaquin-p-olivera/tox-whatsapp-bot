@@ -60,6 +60,10 @@ before(async () => {
                 res.end('{}')
                 return
             }
+            if (body.text === '!link') {
+                res.end(JSON.stringify({ replies: [{ text: '🟢 Frontend: http://192.168.1.21:5200', mentions: [] }] }))
+                return
+            }
             if (body.text === '!voz') {
                 res.end(JSON.stringify({ replies: [{ text: '', mentions: [], audio: '1.ogg' }] }))
                 return
@@ -191,4 +195,14 @@ test('a sticker reply: downloads it from the API and delivers it to the group', 
     assert.ok(sticker, 'Bob received a stickerMessage')
     assert.equal(sticker.mimetype, 'image/webp')
     assert.equal(Number(sticker.fileLength), FAKE_WEBP.length)
+})
+
+test('a URL on a private address goes out as link data so WhatsApp can make it tappable', async () => {
+    await alice.sendGroupConversation(GROUP, '!link')
+    const reply = await bob.expectGroupMessage(GROUP, { senderJid: BOT, timeoutMs: 10_000 })
+
+    const extended = reply.message.extendedTextMessage
+    assert.equal(extended?.text, '🟢 Frontend: http://192.168.1.21:5200')
+    assert.equal(extended?.matchedText, 'http://192.168.1.21:5200')
+    assert.equal(extended?.title, '192.168.1.21:5200')
 })

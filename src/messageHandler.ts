@@ -9,6 +9,8 @@ export interface ChatMessage {
     senderAltJid?: string
     senderName?: string
     text: string
+    /** JIDs the sender tagged with @ in the message (as WhatsApp reports them). */
+    mentionedJids?: string[]
     isGroup: boolean
     fromMe: boolean
     /** Opaque handle the sender uses to quote the original message. */
@@ -20,6 +22,8 @@ export interface GroupMember {
     userId: string
     aliases: string[]
     name?: string
+    /** Administrator (or creator) of the group, as WhatsApp reports it. */
+    isAdmin?: boolean
 }
 
 export interface SendOptions {
@@ -31,6 +35,7 @@ export type SendText = (chatJid: string, text: string, options?: SendOptions) =>
 export type SendAudio = (chatJid: string, audio: ToxAudio, options?: SendOptions) => Promise<void>
 export type SendSticker = (chatJid: string, sticker: ToxSticker, options?: SendOptions) => Promise<void>
 export type SendImage = (chatJid: string, image: ToxImage, options?: SendOptions) => Promise<void>
+export type SendReaction = (chatJid: string, emoji: string, target: unknown) => Promise<void>
 export type GetGroupMembers = (chatJid: string) => Promise<GroupMember[]>
 
 export interface HandlerLogger {
@@ -49,9 +54,12 @@ interface Deps {
     sendAudio: SendAudio
     sendSticker: SendSticker
     sendImage: SendImage
+    sendReaction: SendReaction
     logger: HandlerLogger
     /** Optional: lets the API pick a random member. Failures are tolerated. */
     getGroupMembers?: GetGroupMembers
+    /** Optional: the bot's own JIDs, so a tag of the bot itself is flagged for the API (e.g. `!gay @bot`). */
+    getSelfJids?: () => string[]
 }
 
 /** Removes the ":device" segment: "123:4@lid" -> "123@lid". */
@@ -76,11 +84,16 @@ export function renderMentions(reply: ToxReply): { text: string; mentionJids: st
     return { text, mentionJids }
 }
 
-export function createMessageHandler({ config, tox, sendText, sendAudio, sendSticker, sendImage, logger, getGroupMembers }: Deps) {
+export function createMessageHandler({ config, tox, sendText, sendAudio, sendSticker, sendImage, sendReaction, logger, getGroupMembers, getSelfJids }: Deps) {
     const startsWithPrefix = (text: string) => config.commandPrefixes.some((prefix) => text.startsWith(prefix))
 
-    async function listParticipants(message: ChatMessage, senderId: string): Promise<ToxParticipant[] | undefined> {
-        if (!message.isGroup || !getGroupMembers) return undefined
+    /** The group's member list for the API, plus whether the sender administers this group. When the roster can't be
+     * read, the sender is reported as NOT an admin: an admin-only command is refused rather than guessed. */
+    async function inspectGroup(
+        message: ChatMessage,
+        senderId: string
+    ): Promise<{ participants?: ToxParticipant[]; senderIsGroupAdmin?: boolean }> {
+        if (!message.isGroup || !getGroupMembers) return {}
         try {
             const senderIds = new Set([senderId, message.senderAltJid && stripDevice(message.senderAltJid)])
             const members = await getGroupMembers(message.chatJid)
@@ -94,10 +107,11 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
                     membersExcludingBot: members.length
                 })
             }
-            return candidates
+            const sender = members.find((member) => [member.userId, ...member.aliases].some((id) => senderIds.has(id)))
+            return { participants: candidates, senderIsGroupAdmin: Boolean(sender?.isAdmin) }
         } catch (error) {
             logger.warn('Could not list group members; the API will use who it has seen', { error: String(error) })
-            return undefined
+            return { senderIsGroupAdmin: false }
         }
     }
 
@@ -121,8 +135,10 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         }
 
         const senderId = stripDevice(message.senderJid)
+        const selfJids = new Set((getSelfJids?.() ?? []).map(stripDevice))
         let replies: ToxReply[]
         try {
+            const group = await inspectGroup(message, senderId)
             replies = await tox.sendMessage({
                 platform: 'whatsapp',
                 chat_id: message.chatJid,
@@ -130,7 +146,14 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
                 user_name: message.senderName,
                 text,
                 is_group: message.isGroup,
-                participants: await listParticipants(message, senderId)
+                participants: group.participants,
+                sender_is_group_admin: group.senderIsGroupAdmin,
+                mentioned: message.mentionedJids?.length
+                    ? message.mentionedJids.map((jid) => ({
+                          user_id: stripDevice(jid),
+                          ...(selfJids.has(stripDevice(jid)) ? { is_bot: true } : {})
+                      }))
+                    : undefined
             })
         } catch (error) {
             logger.error('Tox API call failed', { error: error instanceof ToxApiError ? error.message : String(error) })
@@ -142,6 +165,10 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             const quoteRef = index === 0 ? message.quoteRef : undefined
             const hasMedia = Boolean(reply.audio) || Boolean(reply.sticker) || Boolean(reply.image)
             try {
+                if (reply.reaction) {
+                    // Always reacts to the command message itself, whichever reply of the list carries it.
+                    await sendReaction(message.chatJid, reply.reaction, message.quoteRef)
+                }
                 if (reply.audio) {
                     await sendAudio(message.chatJid, await tox.fetchAudio(reply.audio), { quoteRef })
                 }
