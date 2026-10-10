@@ -42,6 +42,12 @@ before(async () => {
             res.end(FAKE_M4A)
             return
         }
+        // GET /api/v1/blacklist: nobody is banned (the bot reads it on connect)
+        if (req.method === 'GET' && req.url?.startsWith('/api/v1/blacklist')) {
+            res.setHeader('content-type', 'application/json')
+            res.end('[]')
+            return
+        }
         // GET /api/v1/stickers/<id>: serve a fake webp
         if (req.method === 'GET' && req.url?.startsWith('/api/v1/stickers/')) {
             stickerRequests.push({ url: req.url, apiKey: req.headers['x-api-key'] as string | undefined })

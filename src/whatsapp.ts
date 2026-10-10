@@ -1,9 +1,11 @@
-import { ConsoleLogger, createStore, WaClient, type Proto, type WaClientOptions, type WaIncomingMessageEvent, type WaStore } from 'zapo-js'
+import { ConsoleLogger, createStore, downloadMediaMessage, WaClient, type Proto, type WaClientOptions, type WaGroupMetadata, type WaIncomingMessageEvent, type WaStore } from 'zapo-js'
 import { createSqliteStore } from '@zapo-js/store-sqlite'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
+import type { BlacklistEntry } from './blacklist.ts'
 import type { Config } from './config.ts'
+import { findBlacklisted, type SweepMember } from './blacklist.ts'
 import { createMessageHandler, renderMentions, stripDevice, type ChatMessage, type GroupMember, type HandlerLogger } from './messageHandler.ts'
 import { findPrivateLink } from './links.ts'
 import { createPairingController } from './pairing.ts'
@@ -14,7 +16,7 @@ export interface BotOptions {
     clientOptions?: Partial<WaClientOptions>
     /** Replaces the persistent SQLite store (tests use an in-memory one). */
     store?: WaStore
-    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage' | 'fetchPendingAlerts'>
+    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage' | 'fetchPendingAlerts' | 'fetchBlacklist'>
 }
 
 export interface Bot {
@@ -37,10 +39,36 @@ export function extractText(message?: Proto.IMessage | null): string | undefined
     )
 }
 
+/** Pictures bigger than this are not forwarded (the API's own limit is a little higher once base64-encoded). */
+export const MAX_IMAGE_BYTES = 5_000_000
+
+/** The message holding the picture: the one itself (an image sent with the command as caption) or the one it replies to. */
+export function imageSource(message?: Proto.IMessage | null, event?: WaIncomingMessageEvent): Proto.IMessage | WaIncomingMessageEvent | undefined {
+    if (message?.imageMessage) return event ?? message
+    const quoted = message?.extendedTextMessage?.contextInfo?.quotedMessage
+    return quoted?.imageMessage ? quoted : undefined
+}
+
+async function downloadImage(source: Proto.IMessage | WaIncomingMessageEvent): Promise<Uint8Array | undefined> {
+    const stream = await downloadMediaMessage(source)
+    const chunks: Buffer[] = []
+    let size = 0
+    for await (const chunk of stream) {
+        size += chunk.length
+        if (size > MAX_IMAGE_BYTES) {
+            stream.destroy()
+            return undefined
+        }
+        chunks.push(chunk as Buffer)
+    }
+    return Buffer.concat(chunks)
+}
+
 export function toChatMessage(event: WaIncomingMessageEvent): ChatMessage | null {
     const text = extractText(event.message)
     if (!text) return null
     const { key } = event
+    const source = imageSource(event.message, event)
     return {
         chatJid: key.remoteJid,
         // In groups the sender is the participant; in 1:1 chats it is the chat itself.
@@ -51,7 +79,8 @@ export function toChatMessage(event: WaIncomingMessageEvent): ChatMessage | null
         mentionedJids: [...(event.message?.extendedTextMessage?.contextInfo?.mentionedJid ?? [])],
         isGroup: key.isGroup,
         fromMe: key.fromMe,
-        quoteRef: event
+        quoteRef: event,
+        ...(source ? { getImage: () => downloadImage(source) } : {})
     }
 }
 
@@ -112,11 +141,61 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
         return members
     }
 
+    /** Removes members from a group, given the ids the API knows them under. Throws unless every one was removed. */
+    async function removeMembers(chatJid: string, userIds: string[]): Promise<void> {
+        const members = await getGroupMembers(chatJid)
+        const jids = userIds.map((id) => {
+            const member = members.find((m) => [m.userId, ...m.aliases].includes(id))
+            if (!member) throw new Error(`${id} is not in the group`)
+            return member.userId
+        })
+        const results = await client.group.removeParticipants(chatJid, jids)
+        const failed = results.filter((result) => result.status !== 'ok')
+        if (failed.length > 0) throw new Error(`WhatsApp refused: ${failed.map((r) => `${r.jid} (${r.code})`).join(', ')}`)
+    }
+
+    /** Removes everyone of the blacklist who is in this group. Returns who was removed. A group where the bot is not an
+     * admin is skipped with a warning (nothing else to do there). */
+    async function sweepGroup(chatJid: string, blacklist: BlacklistEntry[]): Promise<SweepMember[]> {
+        return sweepMetadata(await client.group.queryGroupMetadata(chatJid), blacklist)
+    }
+
+    async function sweepMetadata(metadata: WaGroupMetadata, blacklist: BlacklistEntry[]): Promise<SweepMember[]> {
+        const chatJid = metadata.jid
+        const members: SweepMember[] = metadata.participants.map((participant) => ({
+            jid: participant.jid,
+            ids: [participant.jid, participant.lid, participant.phoneNumber].filter((id): id is string => !!id).map(stripDevice)
+        }))
+        const banned = findBlacklisted(members, blacklist)
+        if (banned.length === 0) return []
+        try {
+            const results = await client.group.removeParticipants(chatJid, banned.map((m) => m.jid))
+            const removed = banned.filter((m) => results.find((r) => r.jid === m.jid)?.status !== 'error')
+            logger.info('Blacklist: removed members', { chat: chatJid, removed: removed.length, wanted: banned.length })
+            return removed
+        } catch (error) {
+            logger.warn('Blacklist: could not remove members (is the bot an admin there?)', { chat: chatJid, error: String(error) })
+            return []
+        }
+    }
+
+    async function sweepAllGroups(): Promise<void> {
+        const blacklist = await tox.fetchBlacklist()
+        if (blacklist.length === 0) return
+        for (const group of await client.group.queryAllGroups()) {
+            await sweepMetadata(group, blacklist).catch((error) =>
+                logger.warn('Blacklist: could not check a group', { error: String(error) })
+            )
+        }
+    }
+
     const handleMessage = createMessageHandler({
         config,
         tox,
         logger: logger as HandlerLogger,
         getGroupMembers,
+        removeMembers,
+        sweepBlacklist: sweepAllGroups,
         getSelfJids: () => {
             const credentials = client.getCredentials()
             return [credentials?.meJid, credentials?.meLid].filter((id): id is string => !!id)
@@ -165,6 +244,20 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
         }
     })
 
+    // Someone (re)joined a group: if they are on the blacklist they are taken out again right away.
+    client.on('group', (event) => {
+        const chatJid = event.groupJid ?? event.chatJid
+        if (event.action !== 'add' || !chatJid) return
+        void (async () => {
+            const blacklist = await tox.fetchBlacklist()
+            if (blacklist.length === 0) return
+            const removed = await sweepGroup(chatJid, blacklist)
+            if (removed.length > 0 && (config.allowedGroupJids.size === 0 || config.allowedGroupJids.has(chatJid))) {
+                await client.message.send(chatJid, '⛔ Estaba en la lista negra: lo saqué del grupo.')
+            }
+        })().catch((error) => logger.error('Blacklist check on join failed', { error: String(error) }))
+    })
+
     const pairing = createPairingController({
         phoneNumber: config.botPhoneNumber,
         requestPairingCode: (phoneNumber) => client.auth.requestPairingCode(phoneNumber),
@@ -201,6 +294,8 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
         if (event.status === 'open') {
             attempt = 0
             logger.info('Connected to WhatsApp', { newLogin: event.isNewLogin })
+            // Anyone blacklisted who joined a group while the bot was offline.
+            void sweepAllGroups().catch((error) => logger.warn('Blacklist sweep on connect failed', { error: String(error) }))
             return
         }
         if (stopping) return

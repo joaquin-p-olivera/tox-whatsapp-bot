@@ -3,6 +3,7 @@ import { test } from 'node:test'
 
 import {
     API_DOWN_REPLY,
+    REMOVE_FAILED_REPLY,
     createMessageHandler,
     jidUser,
     renderMentions,
@@ -107,6 +108,24 @@ test('forwards a command and quotes the original message in the reply', async ()
         }
     ])
     assert.deepEqual(sent, [{ jid: message.chatJid, text: 'pong', options: { quoteRef: message.quoteRef, mentionJids: undefined } }])
+})
+
+test('forwards the picture of the message as base64, and still answers when it cannot be downloaded', async () => {
+    const { handle, apiCalls } = setup()
+    await handle(makeMessage({ text: '!sticker', getImage: async () => new Uint8Array([1, 2, 3]) }))
+    assert.equal(apiCalls[0]?.image, 'AQID')
+
+    await handle(makeMessage({ text: '!sticker', getImage: async () => { throw new Error('expired') } }))
+    assert.equal(apiCalls[1]?.image, undefined)
+    assert.equal(apiCalls.length, 2)
+})
+
+test('does not download any picture for a message that is not a command', async () => {
+    const { handle, apiCalls } = setup()
+    let downloads = 0
+    await handle(makeMessage({ text: 'mirá esto', getImage: async () => { downloads += 1; return new Uint8Array([1]) } }))
+    assert.equal(downloads, 0)
+    assert.equal(apiCalls.length, 0)
 })
 
 test('forwards the users tagged with @ in the message (device segment stripped)', async () => {
@@ -274,8 +293,8 @@ test('sends the group members to the API, without the sender', async () => {
     })
     await handle(makeMessage({ text: '!m' }))
     assert.deepEqual(apiCalls[0]?.participants, [
-        { user_id: '111@lid', user_name: 'Bob', aliases: ['111@lid'] },
-        { user_id: '222@lid', user_name: undefined, aliases: ['222@lid'] }
+        { user_id: '111@lid', user_name: 'Bob', aliases: ['111@lid'], is_group_admin: false },
+        { user_id: '222@lid', user_name: undefined, aliases: ['222@lid'], is_group_admin: false }
     ])
 })
 
@@ -289,7 +308,7 @@ test('excludes the sender even when the group lists them under another JID form'
     })
     await handle(makeMessage({ text: '!m', senderAltJid: '59899111111:3@s.whatsapp.net' }))
     assert.deepEqual(apiCalls[0]?.participants, [
-        { user_id: '59899222222@s.whatsapp.net', user_name: undefined, aliases: ['59899222222@s.whatsapp.net'] }
+        { user_id: '59899222222@s.whatsapp.net', user_name: undefined, aliases: ['59899222222@s.whatsapp.net'], is_group_admin: false }
     ])
 })
 
@@ -491,4 +510,52 @@ test('if the sticker cannot be downloaded, it logs and sends nothing (no crash, 
     })
     await assert.doesNotReject(handle(makeMessage({ text: '!sticker hola' })))
     assert.deepEqual(errors, ['Failed to send reply'])
+})
+
+test('a ban reply removes the members first and only then announces it', async () => {
+    const removed: { jid: string; ids: string[] }[] = []
+    const { handle, sent } = setup({ replies: [{ text: '🔨 Baneado: {@0}.', mentions: [{ user_id: '111@lid' }], remove: ['111@lid'] }] })
+    // setup() has no removeMembers: that is the "cannot remove" path
+    await handle(makeMessage({ text: '!ban @Bob' }))
+    assert.deepEqual(removed, [])
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0]?.text, REMOVE_FAILED_REPLY)
+})
+
+test('a ban reply with a working removal sends the announcement and asks for the blacklist sweep', async () => {
+    const calls: string[] = []
+    const handle = createMessageHandler({
+        config: makeConfig(),
+        logger: silentLogger,
+        tox: {
+            async sendMessage() {
+                return [{ text: '⛔ {@0}', mentions: [{ user_id: '111@lid' }], remove: ['111@lid'], sweep_blacklist: true }]
+            },
+            async fetchAudio() { throw new Error('unused') },
+            async fetchSticker() { throw new Error('unused') },
+            async fetchImage() { throw new Error('unused') }
+        },
+        async sendText(_jid, text) { calls.push(`text:${text}`) },
+        async sendAudio() {},
+        async sendSticker() {},
+        async sendImage() {},
+        async sendReaction() {},
+        async removeMembers(_jid, ids) { calls.push(`remove:${ids.join(',')}`) },
+        async sweepBlacklist() { calls.push('sweep') }
+    })
+    await handle(makeMessage({ text: '!permaban @Bob' }))
+    assert.deepEqual(calls, ['remove:111@lid', 'text:⛔ @111', 'sweep'])
+})
+
+test('the tagged people are forwarded with what the roster knows about them', async () => {
+    const { handle, apiCalls } = setup({
+        members: [
+            member('198765432100@lid', { name: 'Alice' }),
+            member('111@lid', { name: 'Bob', isAdmin: true, aliases: ['111@lid', '59899@s.whatsapp.net'] })
+        ]
+    })
+    await handle(makeMessage({ text: '!ban @Bob', mentionedJids: ['111:4@lid'] }))
+    assert.deepEqual(apiCalls[0]?.mentioned, [
+        { user_id: '111@lid', user_name: 'Bob', aliases: ['111@lid', '59899@s.whatsapp.net'], is_group_admin: true }
+    ])
 })

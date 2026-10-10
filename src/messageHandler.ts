@@ -15,6 +15,9 @@ export interface ChatMessage {
     fromMe: boolean
     /** Opaque handle the sender uses to quote the original message. */
     quoteRef: unknown
+    /** Downloads the picture this message carries or replies to (undefined when there is none or it is too big). Only
+     * called for messages that are going to be forwarded, so ordinary chatter never costs a download. */
+    getImage?: () => Promise<Uint8Array | undefined>
 }
 
 /** A group member. `aliases` are the other JIDs the same person can appear under. */
@@ -36,6 +39,8 @@ export type SendAudio = (chatJid: string, audio: ToxAudio, options?: SendOptions
 export type SendSticker = (chatJid: string, sticker: ToxSticker, options?: SendOptions) => Promise<void>
 export type SendImage = (chatJid: string, image: ToxImage, options?: SendOptions) => Promise<void>
 export type SendReaction = (chatJid: string, emoji: string, target: unknown) => Promise<void>
+/** Removes members (by the ids the API knows them under) from a group. Throws when it can't (e.g. the bot is not an admin). */
+export type RemoveMembers = (chatJid: string, userIds: string[]) => Promise<void>
 export type GetGroupMembers = (chatJid: string) => Promise<GroupMember[]>
 
 export interface HandlerLogger {
@@ -45,6 +50,7 @@ export interface HandlerLogger {
     debug(message: string, context?: Record<string, unknown>): void
 }
 
+export const REMOVE_FAILED_REPLY = '⚠️ No pude sacarlo del grupo. ¿Soy admin del grupo?'
 export const API_DOWN_REPLY = '⚠️ Tox no está disponible en este momento. Probá de nuevo en un rato.'
 
 interface Deps {
@@ -58,6 +64,10 @@ interface Deps {
     logger: HandlerLogger
     /** Optional: lets the API pick a random member. Failures are tolerated. */
     getGroupMembers?: GetGroupMembers
+    /** Optional: removes members from the group (!ban). Without it the removal is reported as not possible. */
+    removeMembers?: RemoveMembers
+    /** Optional: removes everyone on the blacklist from every group the bot is in (!permaban). Failures are logged. */
+    sweepBlacklist?: () => Promise<void>
     /** Optional: the bot's own JIDs, so a tag of the bot itself is flagged for the API (e.g. `!gay @bot`). */
     getSelfJids?: () => string[]
 }
@@ -84,7 +94,7 @@ export function renderMentions(reply: ToxReply): { text: string; mentionJids: st
     return { text, mentionJids }
 }
 
-export function createMessageHandler({ config, tox, sendText, sendAudio, sendSticker, sendImage, sendReaction, logger, getGroupMembers, getSelfJids }: Deps) {
+export function createMessageHandler({ config, tox, sendText, sendAudio, sendSticker, sendImage, sendReaction, logger, getGroupMembers, getSelfJids, removeMembers, sweepBlacklist }: Deps) {
     const startsWithPrefix = (text: string) => config.commandPrefixes.some((prefix) => text.startsWith(prefix))
 
     /** The group's member list for the API, plus whether the sender administers this group. When the roster can't be
@@ -92,7 +102,7 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
     async function inspectGroup(
         message: ChatMessage,
         senderId: string
-    ): Promise<{ participants?: ToxParticipant[]; senderIsGroupAdmin?: boolean }> {
+    ): Promise<{ participants?: ToxParticipant[]; senderIsGroupAdmin?: boolean; roster?: GroupMember[] }> {
         if (!message.isGroup || !getGroupMembers) return {}
         try {
             const senderIds = new Set([senderId, message.senderAltJid && stripDevice(message.senderAltJid)])
@@ -100,7 +110,12 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             const candidates = members
                 // The sender must never be a candidate, whichever form of their JID the group uses.
                 .filter((member) => ![member.userId, ...member.aliases].some((id) => senderIds.has(id)))
-                .map((member) => ({ user_id: member.userId, user_name: member.name, aliases: member.aliases }))
+                .map((member) => ({
+                    user_id: member.userId,
+                    user_name: member.name,
+                    aliases: member.aliases,
+                    is_group_admin: Boolean(member.isAdmin)
+                }))
             if (candidates.length === 0) {
                 logger.warn('No one to mention: the group has no members besides the sender and the bot', {
                     chat: message.chatJid,
@@ -108,10 +123,22 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
                 })
             }
             const sender = members.find((member) => [member.userId, ...member.aliases].some((id) => senderIds.has(id)))
-            return { participants: candidates, senderIsGroupAdmin: Boolean(sender?.isAdmin) }
+            return { participants: candidates, senderIsGroupAdmin: Boolean(sender?.isAdmin), roster: members }
         } catch (error) {
             logger.warn('Could not list group members; the API will use who it has seen', { error: String(error) })
             return { senderIsGroupAdmin: false }
+        }
+    }
+
+    /** The picture of the message (its own or the one it replies to), for commands that work on one (!sticker). A
+     * failed download is not worth failing the command for: the API answers without it. */
+    async function loadImage(message: ChatMessage): Promise<Uint8Array | undefined> {
+        if (!message.getImage) return undefined
+        try {
+            return await message.getImage()
+        } catch (error) {
+            logger.warn('Could not download the message picture', { error: String(error) })
+            return undefined
         }
     }
 
@@ -138,6 +165,7 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         const selfJids = new Set((getSelfJids?.() ?? []).map(stripDevice))
         let replies: ToxReply[]
         try {
+            const image = await loadImage(message)
             const group = await inspectGroup(message, senderId)
             replies = await tox.sendMessage({
                 platform: 'whatsapp',
@@ -149,11 +177,21 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
                 participants: group.participants,
                 sender_is_group_admin: group.senderIsGroupAdmin,
                 mentioned: message.mentionedJids?.length
-                    ? message.mentionedJids.map((jid) => ({
-                          user_id: stripDevice(jid),
-                          ...(selfJids.has(stripDevice(jid)) ? { is_bot: true } : {})
-                      }))
-                    : undefined
+                    ? message.mentionedJids.map((jid) => {
+                          const id = stripDevice(jid)
+                          // What the roster knows about the tagged person (their other ids, whether they administer the
+                          // group): moderation commands rely on it. Absent when the roster couldn't be read.
+                          const member = group.roster?.find((m) => [m.userId, ...m.aliases].includes(id))
+                          return {
+                              user_id: id,
+                              ...(selfJids.has(id) ? { is_bot: true } : {}),
+                              ...(member
+                                  ? { user_name: member.name, aliases: member.aliases, is_group_admin: Boolean(member.isAdmin) }
+                                  : {})
+                          }
+                      })
+                    : undefined,
+                ...(image ? { image: Buffer.from(image).toString('base64') } : {})
             })
         } catch (error) {
             logger.error('Tox API call failed', { error: error instanceof ToxApiError ? error.message : String(error) })
@@ -165,6 +203,17 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             const quoteRef = index === 0 ? message.quoteRef : undefined
             const hasMedia = Boolean(reply.audio) || Boolean(reply.sticker) || Boolean(reply.image)
             try {
+                if (reply.remove?.length) {
+                    try {
+                        if (!removeMembers) throw new Error('removing members is not available')
+                        await removeMembers(message.chatJid, reply.remove)
+                    } catch (error) {
+                        logger.error('Could not remove members', { chat: message.chatJid, error: String(error) })
+                        // The reply text announces the ban as done: it would be a lie.
+                        await sendText(message.chatJid, REMOVE_FAILED_REPLY, { quoteRef })
+                        continue
+                    }
+                }
                 if (reply.reaction) {
                     // Always reacts to the command message itself, whichever reply of the list carries it.
                     await sendReaction(message.chatJid, reply.reaction, message.quoteRef)
@@ -188,6 +237,9 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             } catch (error) {
                 logger.error('Failed to send reply', { chat: message.chatJid, error: String(error) })
                 return
+            }
+            if (reply.sweep_blacklist && sweepBlacklist) {
+                void sweepBlacklist().catch((error) => logger.error('Blacklist sweep failed', { error: String(error) }))
             }
         }
     }

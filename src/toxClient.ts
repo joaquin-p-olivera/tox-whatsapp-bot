@@ -1,3 +1,5 @@
+import type { BlacklistEntry } from './blacklist.ts'
+
 export interface ToxParticipant {
     user_id: string
     user_name?: string
@@ -5,6 +7,8 @@ export interface ToxParticipant {
     aliases?: string[]
     /** True when this is the bot itself (someone tagged the bot). */
     is_bot?: boolean
+    /** Whether this member administers the group, as read from the roster (moderation commands need it). */
+    is_group_admin?: boolean
 }
 
 export interface ToxMessage {
@@ -20,6 +24,8 @@ export interface ToxMessage {
     mentioned?: ToxParticipant[]
     /** In a group: whether the sender is an administrator of THAT group (the API requires it for admin-only commands). */
     sender_is_group_admin?: boolean
+    /** Base64 of the picture the message carries or replies to, when there is one (e.g. for !sticker). */
+    image?: string
 }
 
 export interface ToxReply {
@@ -34,6 +40,10 @@ export interface ToxReply {
     image?: string
     /** An emoji to react to the command message with (nothing else is sent), e.g. for !uid. */
     reaction?: string
+    /** User ids to remove from the chat the command ran in (!ban). The bot must be a group admin there. */
+    remove?: string[]
+    /** Remove everyone on the API's blacklist from every group the bot is in (sent by !permaban). */
+    sweep_blacklist?: boolean
 }
 
 export interface ToxAudio {
@@ -107,7 +117,9 @@ export class ToxClient {
             ...(reply.audio ? { audio: reply.audio } : {}),
             ...(reply.sticker ? { sticker: reply.sticker } : {}),
             ...(reply.image ? { image: reply.image } : {}),
-            ...(reply.reaction ? { reaction: reply.reaction } : {})
+            ...(reply.reaction ? { reaction: reply.reaction } : {}),
+            ...(reply.remove?.length ? { remove: reply.remove } : {}),
+            ...(reply.sweep_blacklist ? { sweep_blacklist: true } : {})
         }))
     }
 
@@ -134,6 +146,12 @@ export class ToxClient {
     async fetchPendingAlerts(): Promise<PendingAlert[]> {
         const response = await this.get('/api/v1/alerts/pending?platform=whatsapp', 'pending alerts')
         return (await response.json()) as PendingAlert[]
+    }
+
+    /** Everyone permanently banned (!permaban). Read-only: the same list comes back every time. */
+    async fetchBlacklist(): Promise<BlacklistEntry[]> {
+        const response = await this.get('/api/v1/blacklist?platform=whatsapp', 'blacklist')
+        return (await response.json()) as BlacklistEntry[]
     }
 
     private async get(path: string, what: string): Promise<Response> {
