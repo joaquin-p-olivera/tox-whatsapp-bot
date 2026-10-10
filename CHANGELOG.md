@@ -9,6 +9,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Follows long-running commands (`!claude`): a reply with a `job` is sent right away and the bot polls `GET /api/v1/jobs/{id}` until the answer is ready, then sends it quoting the command.
 - Moderation: removes members when a reply asks for it (`remove`, needs the bot to be a group admin) and enforces the API's blacklist (`!permaban`): sweeps every group it is in when asked and on connect, and checks a group whenever someone is added to it. Forwards each tagged person's aliases and group-admin status from the roster.
 - Forwards the picture a command message carries or replies to (up to 5 MB, base64 in the optional `image` field), so `!sticker` can turn it into a sticker. Only downloaded for messages that are being forwarded.
 - Sends each group member's aliases (LID and phone number) so the API can honour `!mute` whichever form is used.

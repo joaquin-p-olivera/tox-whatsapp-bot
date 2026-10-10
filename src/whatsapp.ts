@@ -16,7 +16,7 @@ export interface BotOptions {
     clientOptions?: Partial<WaClientOptions>
     /** Replaces the persistent SQLite store (tests use an in-memory one). */
     store?: WaStore
-    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage' | 'fetchPendingAlerts' | 'fetchBlacklist'>
+    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage' | 'fetchPendingAlerts' | 'fetchBlacklist' | 'fetchJob'>
 }
 
 export interface Bot {

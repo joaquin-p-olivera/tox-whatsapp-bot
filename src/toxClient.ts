@@ -42,6 +42,8 @@ export interface ToxReply {
     reaction?: string
     /** User ids to remove from the chat the command ran in (!ban). The bot must be a group admin there. */
     remove?: string[]
+    /** Id of a long-running job (!claude): the text is sent now and the bot polls `fetchJob` for the rest. */
+    job?: string
     /** Remove everyone on the API's blacklist from every group the bot is in (sent by !permaban). */
     sweep_blacklist?: boolean
 }
@@ -73,6 +75,26 @@ export interface PendingAlert {
 }
 
 export class ToxApiError extends Error {}
+
+/** A reply as the API sent it, with only the fields that carry something. */
+function normalizeReply(reply: ToxReply): ToxReply {
+    return {
+        text: reply.text,
+        mentions: reply.mentions ?? [],
+        ...(reply.audio ? { audio: reply.audio } : {}),
+        ...(reply.sticker ? { sticker: reply.sticker } : {}),
+        ...(reply.image ? { image: reply.image } : {}),
+        ...(reply.reaction ? { reaction: reply.reaction } : {}),
+        ...(reply.job ? { job: reply.job } : {}),
+        ...(reply.remove?.length ? { remove: reply.remove } : {}),
+        ...(reply.sweep_blacklist ? { sweep_blacklist: true } : {})
+    }
+}
+
+export interface ToxJob {
+    status: 'running' | 'done'
+    replies: ToxReply[]
+}
 
 interface ToxResponse {
     replies: ToxReply[]
@@ -111,16 +133,7 @@ export class ToxClient {
             throw new ToxApiError(`Tox API responded ${response.status}`)
         }
         const body = (await response.json()) as ToxResponse
-        return body.replies.map((reply) => ({
-            text: reply.text,
-            mentions: reply.mentions ?? [],
-            ...(reply.audio ? { audio: reply.audio } : {}),
-            ...(reply.sticker ? { sticker: reply.sticker } : {}),
-            ...(reply.image ? { image: reply.image } : {}),
-            ...(reply.reaction ? { reaction: reply.reaction } : {}),
-            ...(reply.remove?.length ? { remove: reply.remove } : {}),
-            ...(reply.sweep_blacklist ? { sweep_blacklist: true } : {})
-        }))
+        return body.replies.map(normalizeReply)
     }
 
     /** Downloads a sound clip served by the API. */
@@ -146,6 +159,23 @@ export class ToxClient {
     async fetchPendingAlerts(): Promise<PendingAlert[]> {
         const response = await this.get('/api/v1/alerts/pending?platform=whatsapp', 'pending alerts')
         return (await response.json()) as PendingAlert[]
+    }
+
+    /** State of a long-running job; null when the API no longer knows it (expired, or it restarted). */
+    async fetchJob(id: string): Promise<ToxJob | null> {
+        let response: Response
+        try {
+            response = await this.fetchImpl(`${this.baseUrl}/api/v1/jobs/${encodeURIComponent(id)}`, {
+                headers: { 'x-api-key': this.apiKey },
+                signal: AbortSignal.timeout(this.timeoutMs)
+            })
+        } catch (error) {
+            throw new ToxApiError(`Tox API unreachable: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        if (response.status === 404) return null
+        if (!response.ok) throw new ToxApiError(`Tox API responded ${response.status} for job "${id}"`)
+        const body = (await response.json()) as ToxJob
+        return { status: body.status, replies: (body.replies ?? []).map(normalizeReply) }
     }
 
     /** Everyone permanently banned (!permaban). Read-only: the same list comes back every time. */

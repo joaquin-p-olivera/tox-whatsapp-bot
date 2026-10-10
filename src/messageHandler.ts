@@ -51,11 +51,12 @@ export interface HandlerLogger {
 }
 
 export const REMOVE_FAILED_REPLY = '⚠️ No pude sacarlo del grupo. ¿Soy admin del grupo?'
+export const JOB_LOST_REPLY = '⚠️ No pude obtener la respuesta (se perdió la consulta).'
 export const API_DOWN_REPLY = '⚠️ Tox no está disponible en este momento. Probá de nuevo en un rato.'
 
 interface Deps {
     config: Config
-    tox: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage'>
+    tox: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage'> & Partial<Pick<ToxClient, 'fetchJob'>>
     sendText: SendText
     sendAudio: SendAudio
     sendSticker: SendSticker
@@ -68,6 +69,10 @@ interface Deps {
     removeMembers?: RemoveMembers
     /** Optional: removes everyone on the blacklist from every group the bot is in (!permaban). Failures are logged. */
     sweepBlacklist?: () => Promise<void>
+    /** Optional (tests): how long to wait between checks of a long-running job, and the most it is followed. */
+    jobPollMs?: number
+    jobMaxWaitMs?: number
+    sleep?: (ms: number) => Promise<void>
     /** Optional: the bot's own JIDs, so a tag of the bot itself is flagged for the API (e.g. `!gay @bot`). */
     getSelfJids?: () => string[]
 }
@@ -94,7 +99,7 @@ export function renderMentions(reply: ToxReply): { text: string; mentionJids: st
     return { text, mentionJids }
 }
 
-export function createMessageHandler({ config, tox, sendText, sendAudio, sendSticker, sendImage, sendReaction, logger, getGroupMembers, getSelfJids, removeMembers, sweepBlacklist }: Deps) {
+export function createMessageHandler({ config, tox, sendText, sendAudio, sendSticker, sendImage, sendReaction, logger, getGroupMembers, getSelfJids, removeMembers, sweepBlacklist, jobPollMs = 2_000, jobMaxWaitMs = 15 * 60_000, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }: Deps) {
     const startsWithPrefix = (text: string) => config.commandPrefixes.some((prefix) => text.startsWith(prefix))
 
     /** The group's member list for the API, plus whether the sender administers this group. When the roster can't be
@@ -139,6 +144,80 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         } catch (error) {
             logger.warn('Could not download the message picture', { error: String(error) })
             return undefined
+        }
+    }
+
+    async function deliver(message: ChatMessage, replies: ToxReply[]): Promise<boolean> {
+        for (const [index, reply] of replies.entries()) {
+            // Only the first reply quotes the command, so multi-part answers stay readable.
+            const quoteRef = index === 0 ? message.quoteRef : undefined
+            const hasMedia = Boolean(reply.audio) || Boolean(reply.sticker) || Boolean(reply.image)
+            try {
+                if (reply.remove?.length) {
+                    try {
+                        if (!removeMembers) throw new Error('removing members is not available')
+                        await removeMembers(message.chatJid, reply.remove)
+                    } catch (error) {
+                        logger.error('Could not remove members', { chat: message.chatJid, error: String(error) })
+                        // The reply text announces the ban as done: it would be a lie.
+                        await sendText(message.chatJid, REMOVE_FAILED_REPLY, { quoteRef })
+                        continue
+                    }
+                }
+                if (reply.reaction) {
+                    // Always reacts to the command message itself, whichever reply of the list carries it.
+                    await sendReaction(message.chatJid, reply.reaction, message.quoteRef)
+                }
+                if (reply.audio) {
+                    await sendAudio(message.chatJid, await tox.fetchAudio(reply.audio), { quoteRef })
+                }
+                if (reply.sticker) {
+                    await sendSticker(message.chatJid, await tox.fetchSticker(reply.sticker), { quoteRef })
+                }
+                if (reply.image) {
+                    await sendImage(message.chatJid, await tox.fetchImage(reply.image), { quoteRef })
+                }
+                if (reply.text) {
+                    const { text: body, mentionJids } = renderMentions(reply)
+                    await sendText(message.chatJid, body, {
+                        quoteRef: hasMedia ? undefined : quoteRef,
+                        mentionJids: mentionJids.length > 0 ? mentionJids : undefined
+                    })
+                }
+            } catch (error) {
+                logger.error('Failed to send reply', { chat: message.chatJid, error: String(error) })
+                return false
+            }
+            if (reply.sweep_blacklist && sweepBlacklist) {
+                void sweepBlacklist().catch((error) => logger.error('Blacklist sweep failed', { error: String(error) }))
+            }
+        }
+        return true
+    }
+
+    /** Polls a long-running job and, once it is done, sends its replies to the chat that asked (quoting the command). */
+    async function followJob(message: ChatMessage, jobId: string): Promise<void> {
+        if (!tox.fetchJob) return
+        const deadline = Date.now() + jobMaxWaitMs
+        try {
+            while (Date.now() < deadline) {
+                await sleep(jobPollMs)
+                let job
+                try {
+                    job = await tox.fetchJob(jobId)
+                } catch (error) {
+                    logger.warn('Could not check a job, will retry', { error: String(error) })
+                    continue
+                }
+                if (job === null) break // the API forgot it (it restarted, or it expired)
+                if (job.status === 'done') {
+                    await deliver(message, job.replies)
+                    return
+                }
+            }
+            await sendText(message.chatJid, JOB_LOST_REPLY, { quoteRef: message.quoteRef })
+        } catch (error) {
+            logger.error('Could not deliver a job result', { chat: message.chatJid, error: String(error) })
         }
     }
 
@@ -198,49 +277,11 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             replies = [{ text: API_DOWN_REPLY, mentions: [] }]
         }
 
-        for (const [index, reply] of replies.entries()) {
-            // Only the first reply quotes the command, so multi-part answers stay readable.
-            const quoteRef = index === 0 ? message.quoteRef : undefined
-            const hasMedia = Boolean(reply.audio) || Boolean(reply.sticker) || Boolean(reply.image)
-            try {
-                if (reply.remove?.length) {
-                    try {
-                        if (!removeMembers) throw new Error('removing members is not available')
-                        await removeMembers(message.chatJid, reply.remove)
-                    } catch (error) {
-                        logger.error('Could not remove members', { chat: message.chatJid, error: String(error) })
-                        // The reply text announces the ban as done: it would be a lie.
-                        await sendText(message.chatJid, REMOVE_FAILED_REPLY, { quoteRef })
-                        continue
-                    }
-                }
-                if (reply.reaction) {
-                    // Always reacts to the command message itself, whichever reply of the list carries it.
-                    await sendReaction(message.chatJid, reply.reaction, message.quoteRef)
-                }
-                if (reply.audio) {
-                    await sendAudio(message.chatJid, await tox.fetchAudio(reply.audio), { quoteRef })
-                }
-                if (reply.sticker) {
-                    await sendSticker(message.chatJid, await tox.fetchSticker(reply.sticker), { quoteRef })
-                }
-                if (reply.image) {
-                    await sendImage(message.chatJid, await tox.fetchImage(reply.image), { quoteRef })
-                }
-                if (reply.text) {
-                    const { text: body, mentionJids } = renderMentions(reply)
-                    await sendText(message.chatJid, body, {
-                        quoteRef: hasMedia ? undefined : quoteRef,
-                        mentionJids: mentionJids.length > 0 ? mentionJids : undefined
-                    })
-                }
-            } catch (error) {
-                logger.error('Failed to send reply', { chat: message.chatJid, error: String(error) })
-                return
-            }
-            if (reply.sweep_blacklist && sweepBlacklist) {
-                void sweepBlacklist().catch((error) => logger.error('Blacklist sweep failed', { error: String(error) }))
-            }
+        if (!(await deliver(message, replies))) return
+        // A long-running command (!claude) answered with a placeholder: the real answer is picked up when it is ready,
+        // without holding this handler (other commands keep working meanwhile).
+        for (const reply of replies) {
+            if (reply.job) void followJob(message, reply.job)
         }
     }
 }

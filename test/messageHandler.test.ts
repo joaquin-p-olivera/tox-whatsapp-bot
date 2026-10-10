@@ -3,6 +3,7 @@ import { test } from 'node:test'
 
 import {
     API_DOWN_REPLY,
+    JOB_LOST_REPLY,
     REMOVE_FAILED_REPLY,
     createMessageHandler,
     jidUser,
@@ -558,4 +559,69 @@ test('the tagged people are forwarded with what the roster knows about them', as
     assert.deepEqual(apiCalls[0]?.mentioned, [
         { user_id: '111@lid', user_name: 'Bob', aliases: ['111@lid', '59899@s.whatsapp.net'], is_group_admin: true }
     ])
+})
+
+function jobHandler(fetchJob: (id: string) => Promise<{ status: 'running' | 'done'; replies: ToxReply[] } | null>) {
+    const sent: { text: string; quoted: unknown }[] = []
+    const handle = createMessageHandler({
+        config: makeConfig(),
+        logger: silentLogger,
+        tox: {
+            async sendMessage() {
+                return [{ text: '⏳ Generando respuesta...', mentions: [], job: 'job-1' }]
+            },
+            async fetchAudio() { throw new Error('unused') },
+            async fetchSticker() { throw new Error('unused') },
+            async fetchImage() { throw new Error('unused') },
+            fetchJob
+        },
+        async sendText(_jid, text, options) { sent.push({ text, quoted: options?.quoteRef }) },
+        async sendAudio() {},
+        async sendSticker() {},
+        async sendImage() {},
+        async sendReaction() {},
+        jobPollMs: 1,
+        jobMaxWaitMs: 5_000,
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 2)))
+    })
+    return { handle, sent }
+}
+
+/** Waits (up to 3 s) until `sent` has `count` messages: the follow-up runs in the background. */
+async function settle(sent: unknown[], count: number): Promise<void> {
+    const deadline = Date.now() + 3_000
+    while (sent.length < count && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5))
+}
+
+test('a job reply sends the placeholder now and the answer when the job is done, quoting the command', async () => {
+    let polls = 0
+    const { handle, sent } = jobHandler(async () => {
+        polls += 1
+        return polls < 3 ? { status: 'running', replies: [] } : { status: 'done', replies: [{ text: 'Todo bien.', mentions: [] }] }
+    })
+    const message = makeMessage({ text: '!claude hola' })
+    await handle(message)
+    assert.deepEqual(sent.map((s) => s.text), ['⏳ Generando respuesta...'])
+    await settle(sent, 2)
+    assert.deepEqual(sent.map((s) => s.text), ['⏳ Generando respuesta...', 'Todo bien.'])
+    assert.equal(sent[1]?.quoted, message.quoteRef)
+})
+
+test('a job the API no longer knows is reported instead of waiting forever', async () => {
+    const { handle, sent } = jobHandler(async () => null)
+    await handle(makeMessage({ text: '!claude hola' }))
+    await settle(sent, 2)
+    assert.equal(sent.at(-1)?.text, JOB_LOST_REPLY)
+})
+
+test('a failing job check is retried', async () => {
+    let calls = 0
+    const { handle, sent } = jobHandler(async () => {
+        calls += 1
+        if (calls === 1) throw new Error('temporary')
+        return { status: 'done', replies: [{ text: 'listo', mentions: [] }] }
+    })
+    await handle(makeMessage({ text: '!claude hola' }))
+    await settle(sent, 2)
+    assert.equal(sent.at(-1)?.text, 'listo')
 })

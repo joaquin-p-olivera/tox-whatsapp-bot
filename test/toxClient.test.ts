@@ -145,3 +145,20 @@ test('fetchPendingAlerts requests this platform and returns the alerts', async (
     ])
     assert.equal(seen, 'http://api/api/v1/alerts/pending?platform=whatsapp')
 })
+
+test('fetchJob returns the state and the replies, and null when the API no longer knows the job', async () => {
+    const client = new ToxClient('http://api', 'secret', 1000, async (url) =>
+        String(url).endsWith('/jobs/gone')
+            ? new Response('{}', { status: 404 })
+            : jsonResponse({ status: 'done', replies: [{ text: 'listo' }] })
+    )
+    assert.deepEqual(await client.fetchJob('abc'), { status: 'done', replies: [{ text: 'listo', mentions: [] }] })
+    assert.equal(await client.fetchJob('gone'), null)
+})
+
+test('a reply with a job keeps its id', async () => {
+    const client = new ToxClient('http://api', 'secret', 1000, async () =>
+        jsonResponse({ replies: [{ text: '⏳', job: 'j1' }] })
+    )
+    assert.deepEqual(await client.sendMessage(message), [{ text: '⏳', mentions: [], job: 'j1' }])
+})
