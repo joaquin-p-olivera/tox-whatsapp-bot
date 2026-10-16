@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { loadConfig } from '../src/config.ts'
+import { loadConfig, parseMode } from '../src/config.ts'
 
 test('requires TOX_API_KEY', () => {
     assert.throws(() => loadConfig({}), /TOX_API_KEY/)
@@ -43,4 +43,25 @@ test('rejects bad booleans, log levels and timeouts', () => {
     assert.throws(() => loadConfig({ TOX_API_KEY: 'k', LOG_LEVEL: 'loud' }), /LOG_LEVEL/)
     assert.throws(() => loadConfig({ TOX_API_KEY: 'k', TOX_API_TIMEOUT_MS: '-5' }), /TOX_API_TIMEOUT_MS/)
     assert.throws(() => loadConfig({ TOX_API_KEY: 'k', ALERTS_POLL_INTERVAL_MS: '-5' }), /ALERTS_POLL_INTERVAL_MS/)
+})
+
+test('the mode comes from the command line and defaults to groups', () => {
+    assert.equal(parseMode([]), 'groups')
+    assert.equal(parseMode(['--mode', 'personal']), 'personal')
+    assert.equal(parseMode(['--mode=personal']), 'personal')
+    assert.equal(parseMode(['--mode=groups']), 'groups')
+    assert.throws(() => parseMode(['--mode=other']), /--mode/)
+})
+
+test('personal mode never falls back to the bots session', () => {
+    const personal = loadConfig({ TOX_API_KEY: 'k' }, 'personal')
+    assert.equal(personal.mode, 'personal')
+    assert.notEqual(personal.sessionId, loadConfig({ TOX_API_KEY: 'k' }).sessionId)
+    assert.notEqual(personal.authDir, loadConfig({ TOX_API_KEY: 'k' }).authDir)
+})
+
+test('personal mode lists no groups unless asked to', () => {
+    assert.equal(loadConfig({ TOX_API_KEY: 'k' }, 'personal').personalGroupJids.size, 0)
+    const config = loadConfig({ TOX_API_KEY: 'k', PERSONAL_GROUP_JIDS: ' a@g.us , b@g.us' }, 'personal')
+    assert.deepEqual([...config.personalGroupJids], ['a@g.us', 'b@g.us'])
 })

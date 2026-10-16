@@ -3,6 +3,7 @@ import type { ChatMessage } from '../src/messageHandler.ts'
 
 export function makeConfig(overrides: Partial<Config> = {}): Config {
     return {
+        mode: 'groups',
         toxApiUrl: 'http://127.0.0.1:8000',
         toxApiKey: 'test-key',
         toxApiTimeoutMs: 1000,
@@ -11,6 +12,7 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
         authDir: '.auth-test',
         allowedGroupJids: new Set(),
         allowPrivateChats: false,
+        personalGroupJids: new Set(),
         commandPrefixes: ['!', '/'],
         logLevel: 'error',
         alertsPollIntervalMs: 30_000,

@@ -24,8 +24,23 @@ export interface ToxMessage {
     mentioned?: ToxParticipant[]
     /** In a group: whether the sender is an administrator of THAT group (the API requires it for admin-only commands). */
     sender_is_group_admin?: boolean
-    /** Base64 of the picture the message carries or replies to, when there is one (e.g. for !sticker). */
+    /** Other ids of this same chat (a private chat's phone-number and LID forms): one conversation for !h. */
+    chat_aliases?: string[]
+    /** The bot's personal mode (the owner's own number, a private chat with someone else): the API then expects the
+     * `.b command` form, never treats the sender as an admin and refuses what would need a bot to deliver it later. */
+    personal?: boolean
+    /** The text message this one replies to (!claude hands it to Claude along with the question). */
+    quoted?: ToxQuoted
+    /** Base64 of the picture (or sticker) the message carries or replies to, when there is one (!sticker, !foto). */
     image?: string
+}
+
+export interface ToxQuoted {
+    text: string
+    /** Who wrote it, in the same form as the senders' ids. */
+    user_id?: string
+    /** True when the bot itself wrote it. */
+    is_bot?: boolean
 }
 
 export interface ToxReply {
@@ -42,7 +57,7 @@ export interface ToxReply {
     reaction?: string
     /** User ids to remove from the chat the command ran in (!ban). The bot must be a group admin there. */
     remove?: string[]
-    /** Id of a long-running job (!claude): the text is sent now and the bot polls `fetchJob` for the rest. */
+    /** Id of a long-running job (!claude): this reply (a reaction) is delivered now and the bot polls `fetchJob` for the rest. */
     job?: string
     /** Remove everyone on the API's blacklist from every group the bot is in (sent by !permaban). */
     sweep_blacklist?: boolean
@@ -72,6 +87,17 @@ export interface PendingAlert {
     chat_id: string
     text: string
     mentions: ToxParticipant[]
+}
+
+/** A message of a chat that has history turned on (!h), as the API wants it saved. */
+export interface ToxHistoryMessage {
+    chat_id: string
+    message_id: string
+    sender_id: string
+    sender_name?: string
+    text: string
+    /** ISO 8601 */
+    sent_at: string
 }
 
 export class ToxApiError extends Error {}
@@ -182,6 +208,28 @@ export class ToxClient {
     async fetchBlacklist(): Promise<BlacklistEntry[]> {
         const response = await this.get('/api/v1/blacklist?platform=whatsapp', 'blacklist')
         return (await response.json()) as BlacklistEntry[]
+    }
+
+    /** The chat ids (aliases included) that have history turned on: only their messages are worth forwarding. */
+    async fetchHistoryChats(): Promise<string[]> {
+        const response = await this.get('/api/v1/history/chats?platform=whatsapp', 'history chats')
+        return ((await response.json()) as { chats: string[] }).chats
+    }
+
+    /** Hands messages of chats with history on to the API (it ignores any chat that is not on). */
+    async saveHistory(messages: ToxHistoryMessage[]): Promise<void> {
+        let response: Response
+        try {
+            response = await this.fetchImpl(`${this.baseUrl}/api/v1/history`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-api-key': this.apiKey },
+                body: JSON.stringify({ platform: 'whatsapp', messages }),
+                signal: AbortSignal.timeout(this.timeoutMs)
+            })
+        } catch (error) {
+            throw new ToxApiError(`Tox API unreachable: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        if (!response.ok) throw new ToxApiError(`Tox API responded ${response.status} saving history`)
     }
 
     private async get(path: string, what: string): Promise<Response> {

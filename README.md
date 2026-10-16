@@ -62,6 +62,36 @@ next start. To pair again, delete `.auth/`.
 Until you set it, the bot answers in every group it's in. Private chats are ignored unless
 `ALLOW_PRIVATE_CHATS=true`.
 
+## Two ways to run it
+
+| | Groups (default) | Personal |
+| --- | --- | --- |
+| Start | `npm start` / `npm run start:prod` | `npm run start:personal` (= `node src/index.ts --mode=personal`) |
+| Account | the dedicated bot account | your own number, linked as a device |
+| Where | WhatsApp groups | your private chats, and the groups you list in `PERSONAL_GROUP_JIDS` |
+| Who | anyone in the group | only you (what you type yourself) |
+| Command | `!sticker`, `!voz -h Hola` | `.b sticker`, `.b voz -h Hola` |
+| Env file | `.env` / `.env.prod` | `.env.personal` only |
+| Admin commands | per `ADMIN_USER_IDS` | never: the reply is visible to the other person |
+
+The personal instance **never acts on its own**: no alerts (it would otherwise take the groups bot's queue and send it
+from your number) and no blacklist sweeps. `!recordar` is refused there for the same reason. Groups are ignored
+unless you list them in `PERSONAL_GROUP_JIDS` (comma-separated JIDs; empty = none): type `.b id` in one and the log
+shows the JID it ignored. In a listed group only *your* `.b` messages count, never anyone else's.
+Replies go out from your number, so the other person sees them as yours.
+
+**History.** Both modes forward the *text* of the chats that have history on (`h -on`): everyone's messages in that
+chat, never pictures but their captions yes. The bot only asks the API which chats are on (every 15 s) and sends
+nothing for the others; commands and the bot's own answers are never saved. In the groups bot, `!h -on | -off | -status
+| -delete` and `!res` are for the admins (`ADMIN_USER_IDS`, who must also administer the group); from your own number
+they are `.b h ...` and `.b res`. See the API's README.
+
+Setup: copy `.env` to `.env.personal` and change `BOT_PHONE_NUMBER` (yours), `BOT_SESSION_ID` and `AUTH_DIR`
+(they default to `tox-personal` and `.auth-personal`, so the session never collides with the bot's), then run
+`npm run start:personal` and link it from your phone (Linked devices → *Link with phone number instead*). Both
+instances can run at the same time against the same API. `.auth-personal/` holds your account's keys: it is
+git-ignored, keep it private.
+
 ## Configuration
 
 | Variable              | Default                 | Description                                                  |
@@ -83,6 +113,7 @@ Until you set it, the bot answers in every group it's in. Private chats are igno
 
 - Ignores its own messages, non-text messages and anything that doesn't start with a command prefix.
 - Replies are quoted (the first one), so it's clear who asked.
+- When a command replies to a text message, that text goes to the API too (`quoted`, with who wrote it; the bot's own message is flagged), so `!claude` can answer about it.
 - If the API is unreachable, the chat gets `⚠️ Tox no está disponible en este momento…`.
 - In groups it sends the member list (cached 5 minutes, bot excluded) so the API can pick a random member for `!m`. The sender is excluded whichever JID form (LID or phone number) the group uses. If the list can't be fetched, the API falls back to the users it has seen.
 - Audio replies (`!m`) are downloaded from the API and sent as audio: Ogg/Opus goes out as a voice note, m4a/mp3 as a plain audio file. If the download fails, it's logged and nothing is sent.

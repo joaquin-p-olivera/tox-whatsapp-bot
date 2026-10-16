@@ -1,5 +1,5 @@
 import type { Config } from './config.ts'
-import { ToxApiError, type ToxAudio, type ToxClient, type ToxImage, type ToxParticipant, type ToxReply, type ToxSticker } from './toxClient.ts'
+import { ToxApiError, type ToxAudio, type ToxClient, type ToxHistoryMessage, type ToxImage, type ToxParticipant, type ToxQuoted, type ToxReply, type ToxSticker } from './toxClient.ts'
 
 /** A chat message, normalised so this module knows nothing about the WhatsApp library. */
 export interface ChatMessage {
@@ -13,6 +13,13 @@ export interface ChatMessage {
     mentionedJids?: string[]
     isGroup: boolean
     fromMe: boolean
+    /** WhatsApp's id of the message and when it was sent (ms since epoch), for the saved history. */
+    messageId?: string
+    sentAtMs?: number
+    /** The chat's alternate addressing (phone number <-> LID, private chats), when WhatsApp shares it. */
+    chatAltJid?: string
+    /** The text message this one replies to, and who wrote it (!claude hands it to Claude along with the question). */
+    quoted?: { text: string; senderJid?: string }
     /** Opaque handle the sender uses to quote the original message. */
     quoteRef: unknown
     /** Downloads the picture this message carries or replies to (undefined when there is none or it is too big). Only
@@ -56,7 +63,8 @@ export const API_DOWN_REPLY = '⚠️ Tox no está disponible en este momento. P
 
 interface Deps {
     config: Config
-    tox: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage'> & Partial<Pick<ToxClient, 'fetchJob'>>
+    tox: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage'> &
+        Partial<Pick<ToxClient, 'fetchJob' | 'fetchHistoryChats' | 'saveHistory'>>
     sendText: SendText
     sendAudio: SendAudio
     sendSticker: SendSticker
@@ -99,6 +107,24 @@ export function renderMentions(reply: ToxReply): { text: string; mentionJids: st
     return { text, mentionJids }
 }
 
+/** What starts a command in the personal mode: ".b sticker hola" (the API parses it, this is only the cheap filter). */
+export const PERSONAL_PREFIX = '.b '
+
+/** The chats of a person (not a group, a broadcast list, a status or a channel). */
+function isPrivateChat(chatJid: string): boolean {
+    return chatJid.endsWith('@s.whatsapp.net') || chatJid.endsWith('@lid')
+}
+
+/** The replied-to message for the API. In the personal mode the own account is the owner, not the bot. */
+function quotedOf(quoted: { text: string; senderJid?: string }, selfJids: Set<string>, personal: boolean): ToxQuoted {
+    const id = quoted.senderJid ? stripDevice(quoted.senderJid) : undefined
+    return {
+        text: quoted.text,
+        ...(id ? { user_id: id } : {}),
+        ...(!personal && id && selfJids.has(id) ? { is_bot: true } : {})
+    }
+}
+
 export function createMessageHandler({ config, tox, sendText, sendAudio, sendSticker, sendImage, sendReaction, logger, getGroupMembers, getSelfJids, removeMembers, sweepBlacklist, jobPollMs = 2_000, jobMaxWaitMs = 15 * 60_000, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }: Deps) {
     const startsWithPrefix = (text: string) => config.commandPrefixes.some((prefix) => text.startsWith(prefix))
 
@@ -135,7 +161,7 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         }
     }
 
-    /** The picture of the message (its own or the one it replies to), for commands that work on one (!sticker). A
+    /** The picture of the message (its own or the one it replies to), for commands that work on one (!sticker, !foto). A
      * failed download is not worth failing the command for: the API answers without it. */
     async function loadImage(message: ChatMessage): Promise<Uint8Array | undefined> {
         if (!message.getImage) return undefined
@@ -179,6 +205,7 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
                 }
                 if (reply.text) {
                     const { text: body, mentionJids } = renderMentions(reply)
+                    if (personal) rememberOwnReply(message.chatJid, body)
                     await sendText(message.chatJid, body, {
                         quoteRef: hasMedia ? undefined : quoteRef,
                         mentionJids: mentionJids.length > 0 ? mentionJids : undefined
@@ -221,27 +248,103 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         }
     }
 
-    return async function handleMessage(message: ChatMessage): Promise<void> {
-        if (message.fromMe) return
+    const personal = config.mode === 'personal'
 
+    // --- History: the text of the chats that have it turned on (!h, .b h) goes to the API, in both modes. ---
+    const HISTORY_REFRESH_MS = 15_000
+    const OWN_REPLY_MEMORY_MS = 2 * 60_000
+    let historyChats = new Set<string>()
+    let historyFetchedAt = 0
+    // Personal mode: what the bot itself just wrote (as the owner) comes back as a message of the owner, which is not
+    // theirs to save. (In the groups mode the bot's own messages are simply never looked at.)
+    const ownReplies = new Map<string, number>()
+
+    function rememberOwnReply(chatJid: string, text: string): void {
+        const now = Date.now()
+        for (const [key, at] of ownReplies) if (now - at > OWN_REPLY_MEMORY_MS) ownReplies.delete(key)
+        ownReplies.set(`${chatJid}\n${text}`, now)
+    }
+
+    async function saveIfWanted(message: ChatMessage, selfIds: string[]): Promise<void> {
         const text = message.text.trim()
-        // Cheap local filter: don't call the API for ordinary chatter.
-        if (!text || !startsWithPrefix(text)) return
-
-        if (message.isGroup) {
-            if (config.allowedGroupJids.size > 0 && !config.allowedGroupJids.has(message.chatJid)) {
-                logger.info('Ignoring command from a group that is not allowed (add it to ALLOWED_GROUP_JIDS)', {
-                    chat: message.chatJid
-                })
-                return
-            }
-        } else if (!config.allowPrivateChats) {
-            logger.debug('Ignoring private chat (ALLOW_PRIVATE_CHATS=false)', { chat: message.chatJid })
-            return
+        if (!text || !message.messageId || !tox.fetchHistoryChats || !tox.saveHistory) return
+        // A command is not conversation (".b res", "!claude ...")
+        if (personal ? text.toLowerCase().startsWith(PERSONAL_PREFIX) : startsWithPrefix(text)) return
+        if (message.fromMe) {
+            if (!personal) return // the bot's own words
+            if (ownReplies.delete(`${message.chatJid}\n${message.text}`)) return // its answer, back as the owner's message
         }
 
-        const senderId = stripDevice(message.senderJid)
-        const selfJids = new Set((getSelfJids?.() ?? []).map(stripDevice))
+        if (Date.now() - historyFetchedAt > HISTORY_REFRESH_MS) {
+            historyChats = new Set(await tox.fetchHistoryChats())
+            historyFetchedAt = Date.now()
+        }
+        const chatId = [message.chatJid, message.chatAltJid].find((id) => id && historyChats.has(id))
+        if (!chatId) return
+
+        const sender = message.fromMe ? (selfIds.find((id) => id.endsWith('@lid')) ?? selfIds[0]) : stripDevice(message.senderJid)
+        if (!sender) return
+        const entry: ToxHistoryMessage = {
+            chat_id: chatId,
+            message_id: message.messageId,
+            sender_id: sender,
+            sender_name: message.senderName ?? (message.fromMe ? 'Yo' : undefined),
+            text: message.text,
+            sent_at: new Date(message.sentAtMs ?? Date.now()).toISOString()
+        }
+        await tox.saveHistory([entry])
+    }
+
+    /** Who the sender is. In the personal mode every command is the owner's own message, and in a private chat WhatsApp
+     * names the OTHER person as its "sender": the owner is the account itself, in the LID form groups use for them. */
+    function senderOf(message: ChatMessage, selfIds: string[]): string | undefined {
+        if (!personal) return stripDevice(message.senderJid)
+        return selfIds.find((id) => id.endsWith('@lid')) ?? selfIds[0]
+    }
+
+    return async function handleMessage(message: ChatMessage): Promise<void> {
+        const text = message.text.trim()
+        // Before (and apart from) the commands: every message of a chat with history on, whoever wrote it.
+        void saveIfWanted(message, (getSelfJids?.() ?? []).map(stripDevice)).catch((error) =>
+            logger.warn('Could not save a message of the history', { error: String(error) })
+        )
+        if (personal) {
+            // Only what the owner types, as ".b <command>", in a private chat or in a group they listed: nothing else
+            // ever reaches the API.
+            if (!message.fromMe || !text.toLowerCase().startsWith(PERSONAL_PREFIX)) return
+            if (message.isGroup) {
+                if (!config.personalGroupJids.has(message.chatJid)) {
+                    logger.info('Ignoring a command from a group that is not listed (add it to PERSONAL_GROUP_JIDS)', {
+                        chat: message.chatJid
+                    })
+                    return
+                }
+            } else if (!isPrivateChat(message.chatJid)) return
+        } else {
+            if (message.fromMe) return
+            // Cheap local filter: don't call the API for ordinary chatter.
+            if (!text || !startsWithPrefix(text)) return
+
+            if (message.isGroup) {
+                if (config.allowedGroupJids.size > 0 && !config.allowedGroupJids.has(message.chatJid)) {
+                    logger.info('Ignoring command from a group that is not allowed (add it to ALLOWED_GROUP_JIDS)', {
+                        chat: message.chatJid
+                    })
+                    return
+                }
+            } else if (!config.allowPrivateChats) {
+                logger.debug('Ignoring private chat (ALLOW_PRIVATE_CHATS=false)', { chat: message.chatJid })
+                return
+            }
+        }
+
+        const selfIds = (getSelfJids?.() ?? []).map(stripDevice)
+        const senderId = senderOf(message, selfIds)
+        if (!senderId) {
+            logger.warn('Ignoring a personal command: the own account is not known yet')
+            return
+        }
+        const selfJids = new Set(selfIds)
         let replies: ToxReply[]
         try {
             const image = await loadImage(message)
@@ -251,8 +354,11 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
                 chat_id: message.chatJid,
                 user_id: senderId,
                 user_name: message.senderName,
-                text,
+                // ".B x" is accepted too; the API only knows the lowercase prefix.
+                text: personal ? PERSONAL_PREFIX + text.slice(PERSONAL_PREFIX.length) : text,
                 is_group: message.isGroup,
+                ...(personal ? { personal: true } : {}),
+                ...(personal && message.chatAltJid ? { chat_aliases: [stripDevice(message.chatAltJid)] } : {}),
                 participants: group.participants,
                 sender_is_group_admin: group.senderIsGroupAdmin,
                 mentioned: message.mentionedJids?.length
@@ -263,13 +369,15 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
                           const member = group.roster?.find((m) => [m.userId, ...m.aliases].includes(id))
                           return {
                               user_id: id,
-                              ...(selfJids.has(id) ? { is_bot: true } : {}),
+                              // In the personal mode the own account is the owner, not a bot someone tagged.
+                              ...(!personal && selfJids.has(id) ? { is_bot: true } : {}),
                               ...(member
                                   ? { user_name: member.name, aliases: member.aliases, is_group_admin: Boolean(member.isAdmin) }
                                   : {})
                           }
                       })
                     : undefined,
+                ...(message.quoted ? { quoted: quotedOf(message.quoted, selfJids, personal) } : {}),
                 ...(image ? { image: Buffer.from(image).toString('base64') } : {})
             })
         } catch (error) {
@@ -277,8 +385,10 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             replies = [{ text: API_DOWN_REPLY, mentions: [] }]
         }
 
+        // A command may have turned the history of this chat on or off: look at the list again with the next message.
+        historyFetchedAt = 0
         if (!(await deliver(message, replies))) return
-        // A long-running command (!claude) answered with a placeholder: the real answer is picked up when it is ready,
+        // A long-running command (!claude) answered with just a reaction: the real answer is picked up when it is ready,
         // without holding this handler (other commands keep working meanwhile).
         for (const reply of replies) {
             if (reply.job) void followJob(message, reply.job)

@@ -12,7 +12,7 @@ import {
     type GroupMember,
     type SendOptions
 } from '../src/messageHandler.ts'
-import type { ToxAudio, ToxImage, ToxMessage, ToxReply, ToxSticker } from '../src/toxClient.ts'
+import type { ToxAudio, ToxHistoryMessage, ToxImage, ToxMessage, ToxReply, ToxSticker } from '../src/toxClient.ts'
 import { makeConfig, makeMessage, silentLogger } from './helpers.ts'
 
 const plain = (text: string): ToxReply => ({ text, mentions: [] })
@@ -25,6 +25,8 @@ interface SetupOptions {
     audioFails?: boolean
     stickerFails?: boolean
     imageFails?: boolean
+    /** Chat ids the API says have history turned on (enables the history calls of the fake API). */
+    history?: string[]
 }
 
 function setup(options: SetupOptions = {}) {
@@ -37,6 +39,7 @@ function setup(options: SetupOptions = {}) {
     const imagesFetched: string[] = []
     const imagesSent: { jid: string; image: ToxImage; options: SendOptions | undefined }[] = []
     const reactionsSent: { jid: string; emoji: string; target: unknown }[] = []
+    const historySaved: ToxHistoryMessage[] = []
     const { members } = options
     const handle = createMessageHandler({
         config: makeConfig(options.config),
@@ -61,8 +64,15 @@ function setup(options: SetupOptions = {}) {
                 imagesFetched.push(id)
                 if (options.imageFails) throw new Error('image 404')
                 return { data: new Uint8Array([7, 8, 9]), mimetype: 'image/png' }
+            },
+            async fetchHistoryChats() {
+                return options.history ?? []
+            },
+            async saveHistory(messages) {
+                historySaved.push(...messages)
             }
         },
+        getSelfJids: () => ['999:3@lid', '598000:3@s.whatsapp.net'],
         getGroupMembers: members
             ? async () => {
                   if (members instanceof Error) throw members
@@ -85,7 +95,7 @@ function setup(options: SetupOptions = {}) {
             reactionsSent.push({ jid, emoji, target })
         }
     })
-    return { handle, apiCalls, sent, audiosFetched, audiosSent, stickersFetched, stickersSent, imagesFetched, imagesSent, reactionsSent }
+    return { handle, apiCalls, sent, audiosFetched, audiosSent, stickersFetched, stickersSent, imagesFetched, imagesSent, reactionsSent, historySaved }
 }
 
 const member = (id: string, extra: Partial<GroupMember> = {}): GroupMember => ({ userId: id, aliases: [id], ...extra })
@@ -163,6 +173,17 @@ test('a tag of the bot itself is flagged as is_bot, whichever form of its JID wa
     })
     await handle(makeMessage({ text: '!gay @bot @Bob', mentionedJids: ['999@lid', '111@lid'] }))
     assert.deepEqual(calls[0]?.mentioned, [{ user_id: '999@lid', is_bot: true }, { user_id: '111@lid' }])
+})
+
+test('forwards the replied-to text with who wrote it, and marks the bot\'s own message', async () => {
+    const { handle, apiCalls } = setup()
+    await handle(makeMessage({ text: '!claude qué opinás?', quoted: { text: 'Mañana no llego', senderJid: '111:7@lid' } }))
+    await handle(makeMessage({ text: '!claude y esto?', quoted: { text: 'Hola', senderJid: '999:3@lid' } }))
+    await handle(makeMessage({ text: '!claude sin cita' }))
+
+    assert.deepEqual(apiCalls[0]?.quoted, { text: 'Mañana no llego', user_id: '111@lid' })
+    assert.deepEqual(apiCalls[1]?.quoted, { text: 'Hola', user_id: '999@lid', is_bot: true })
+    assert.equal(apiCalls[2]?.quoted, undefined)
 })
 
 test('reports whether the sender administers THIS group, by any of their JIDs', async () => {
@@ -563,12 +584,14 @@ test('the tagged people are forwarded with what the roster knows about them', as
 
 function jobHandler(fetchJob: (id: string) => Promise<{ status: 'running' | 'done'; replies: ToxReply[] } | null>) {
     const sent: { text: string; quoted: unknown }[] = []
+    const reactions: string[] = []
     const handle = createMessageHandler({
         config: makeConfig(),
         logger: silentLogger,
         tox: {
             async sendMessage() {
-                return [{ text: '⏳ Generando respuesta...', mentions: [], job: 'job-1' }]
+                // what !claude answers: a reaction to the command (no text) and the job to follow
+                return [{ text: '', mentions: [], reaction: '⏳', job: 'job-1' }]
             },
             async fetchAudio() { throw new Error('unused') },
             async fetchSticker() { throw new Error('unused') },
@@ -579,12 +602,12 @@ function jobHandler(fetchJob: (id: string) => Promise<{ status: 'running' | 'don
         async sendAudio() {},
         async sendSticker() {},
         async sendImage() {},
-        async sendReaction() {},
+        async sendReaction(_jid, emoji) { reactions.push(emoji) },
         jobPollMs: 1,
         jobMaxWaitMs: 5_000,
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 2)))
     })
-    return { handle, sent }
+    return { handle, sent, reactions }
 }
 
 /** Waits (up to 3 s) until `sent` has `count` messages: the follow-up runs in the background. */
@@ -593,24 +616,25 @@ async function settle(sent: unknown[], count: number): Promise<void> {
     while (sent.length < count && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5))
 }
 
-test('a job reply sends the placeholder now and the answer when the job is done, quoting the command', async () => {
+test('a job reply reacts now and sends the answer when the job is done, quoting the command', async () => {
     let polls = 0
-    const { handle, sent } = jobHandler(async () => {
+    const { handle, sent, reactions } = jobHandler(async () => {
         polls += 1
         return polls < 3 ? { status: 'running', replies: [] } : { status: 'done', replies: [{ text: 'Todo bien.', mentions: [] }] }
     })
     const message = makeMessage({ text: '!claude hola' })
     await handle(message)
-    assert.deepEqual(sent.map((s) => s.text), ['⏳ Generando respuesta...'])
-    await settle(sent, 2)
-    assert.deepEqual(sent.map((s) => s.text), ['⏳ Generando respuesta...', 'Todo bien.'])
-    assert.equal(sent[1]?.quoted, message.quoteRef)
+    assert.deepEqual(reactions, ['⏳'])
+    assert.equal(sent.length, 0) // no placeholder message
+    await settle(sent, 1)
+    assert.deepEqual(sent.map((s) => s.text), ['Todo bien.'])
+    assert.equal(sent[0]?.quoted, message.quoteRef)
 })
 
 test('a job the API no longer knows is reported instead of waiting forever', async () => {
     const { handle, sent } = jobHandler(async () => null)
     await handle(makeMessage({ text: '!claude hola' }))
-    await settle(sent, 2)
+    await settle(sent, 1)
     assert.equal(sent.at(-1)?.text, JOB_LOST_REPLY)
 })
 
@@ -622,6 +646,116 @@ test('a failing job check is retried', async () => {
         return { status: 'done', replies: [{ text: 'listo', mentions: [] }] }
     })
     await handle(makeMessage({ text: '!claude hola' }))
-    await settle(sent, 2)
+    await settle(sent, 1)
     assert.equal(sent.at(-1)?.text, 'listo')
 })
+
+// Personal mode: the bot is linked to the owner's own number and only answers their ".b command" in private chats.
+const PERSONAL = { config: { mode: 'personal' as const } }
+const own = (text: string, overrides = {}) =>
+    makeMessage({ text, fromMe: true, isGroup: false, chatJid: '59899111222@s.whatsapp.net', senderJid: '59899111222@s.whatsapp.net', ...overrides })
+
+test('personal mode: forwards the owners ".b command" as them, flagged as personal', async () => {
+    const { handle, apiCalls, sent } = setup(PERSONAL)
+    const message = own('.b voz -h Hola mundo')
+    await handle(message)
+
+    assert.equal(apiCalls.length, 1)
+    assert.equal(apiCalls[0]?.text, '.b voz -h Hola mundo')
+    assert.equal(apiCalls[0]?.personal, true)
+    assert.equal(apiCalls[0]?.is_group, false)
+    assert.equal(apiCalls[0]?.chat_id, message.chatJid)
+    assert.equal(apiCalls[0]?.user_id, '999@lid') // the owner (the account), not the person they are chatting with
+    assert.equal(sent[0]?.jid, message.chatJid)
+})
+
+test('personal mode: ignores everything that is not the owners ".b command" in a private chat', async () => {
+    const { handle, apiCalls } = setup(PERSONAL)
+    await handle(own('!sticker'))                                  // the groups prefix
+    await handle(own('.bsticker'))                                 // not separated
+    await handle(own('hola .b sticker'))
+    await handle(own('.b sticker', { fromMe: false }))             // what the other person types is never a command
+    await handle(own('.b sticker', { isGroup: true, chatJid: '1203@g.us' }))  // a group that is not listed
+    await handle(own('.b sticker', { chatJid: 'status@broadcast' }))
+    assert.deepEqual(apiCalls, [])
+})
+
+test('groups mode: the personal form is just chat, and nothing is flagged as personal', async () => {
+    const { handle, apiCalls } = setup()
+    await handle(makeMessage({ text: '.b dado' }))
+    assert.equal(apiCalls.length, 0)
+    await handle(makeMessage())
+    assert.equal(apiCalls[0]?.personal, undefined)
+})
+
+test('personal mode: works in the groups that are listed, as the owner, and never marks their own tag as the bot', async () => {
+    const group = '1203@g.us'
+    const { handle, apiCalls } = setup({ config: { mode: 'personal', personalGroupJids: new Set([group]) } })
+    await handle(own('.b gay @yo', { isGroup: true, chatJid: group, senderJid: '5551@lid', mentionedJids: ['999:3@lid'] }))
+    await handle(own('.b dado', { isGroup: true, chatJid: '9999@g.us' }))
+
+    assert.equal(apiCalls.length, 1)
+    assert.equal(apiCalls[0]?.is_group, true)
+    assert.equal(apiCalls[0]?.personal, true)
+    assert.equal(apiCalls[0]?.user_id, '999@lid')
+    assert.deepEqual(apiCalls[0]?.mentioned, [{ user_id: '999@lid' }])
+})
+
+// History: the text of the chats that have it on, in personal mode only.
+const flush = () => new Promise((resolve) => setImmediate(resolve))
+
+test('personal mode saves what is said in a chat that has history on, whoever said it', async () => {
+    const chat = '59899111222@s.whatsapp.net'
+    const { handle, apiCalls, historySaved } = setup({ ...PERSONAL, history: [chat] })
+
+    // the other person says something (not a command: it is never answered), and the owner says something
+    await handle(own('buenas, ¿cenamos?', { fromMe: false, chatJid: chat, senderJid: chat, senderName: 'Ana', messageId: 'A1', sentAtMs: 1_700_000_000_000 }))
+    await handle(own('dale', { chatJid: chat, messageId: 'B2', senderName: undefined }))
+    await flush()
+
+    assert.deepEqual(apiCalls, [])
+    assert.deepEqual(historySaved.map((m) => [m.message_id, m.sender_id, m.sender_name, m.text]), [
+        ['A1', '59899111222@s.whatsapp.net', 'Ana', 'buenas, ¿cenamos?'],
+        ['B2', '999@lid', 'Yo', 'dale']
+    ])
+    assert.equal(historySaved[0]?.sent_at, '2023-11-14T22:13:20.000Z')
+})
+
+test('personal mode does not save commands, the bots own answers, or chats that are not on', async () => {
+    const chat = '59899111222@s.whatsapp.net'
+    const { handle, historySaved, sent } = setup({ ...PERSONAL, history: [chat], replies: [plain('🎲 4')] })
+
+    await handle(own('.b dado', { chatJid: chat, messageId: 'C1' })) // the command...
+    await flush()
+    assert.equal(sent[0]?.text, '🎲 4')
+    await handle(own('🎲 4', { chatJid: chat, messageId: 'C2' })) // ...and its answer coming back as the owners message
+    await handle(own('hola', { chatJid: '59800000000@s.whatsapp.net', messageId: 'D1' })) // another chat, not on
+    await handle(own('🎲 4', { chatJid: chat, messageId: 'C3' })) // the same text typed by the owner later: that one is theirs
+    await flush()
+
+    assert.deepEqual(historySaved.map((m) => m.message_id), ['C3'])
+})
+
+test('personal mode knows a private chat by either of its two ids', async () => {
+    const { handle, historySaved } = setup({ ...PERSONAL, history: ['777@lid'] })
+    await handle(own('hola', { chatJid: '59899111222@s.whatsapp.net', chatAltJid: '777@lid', messageId: 'E1' }))
+    await flush()
+    assert.equal(historySaved[0]?.chat_id, '777@lid')
+})
+
+test('the groups mode saves what the others say in a group that has history on, but never commands or its own words', async () => {
+    const group = '120363000000000001@g.us'
+    const { handle, apiCalls, historySaved } = setup({ history: [group] })
+
+    await handle(makeMessage({ text: 'hola a todos', messageId: 'F1', senderName: 'Bob', sentAtMs: 1_700_000_000_000 }))
+    await handle(makeMessage({ text: '!ping', messageId: 'F2' })) // a command: answered, not saved
+    await handle(makeMessage({ text: 'chau', messageId: 'F3', fromMe: true })) // the bot's own message
+    await handle(makeMessage({ text: 'otro grupo', messageId: 'F4', chatJid: '120363000000000002@g.us' })) // not on
+    await flush()
+
+    assert.equal(apiCalls.length, 1) // only the command went to the API as a message
+    assert.deepEqual(historySaved.map((m) => [m.chat_id, m.message_id, m.sender_id, m.sender_name, m.text]), [
+        [group, 'F1', '198765432100@lid', 'Bob', 'hola a todos']
+    ])
+})
+

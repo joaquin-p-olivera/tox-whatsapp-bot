@@ -16,7 +16,7 @@ export interface BotOptions {
     clientOptions?: Partial<WaClientOptions>
     /** Replaces the persistent SQLite store (tests use an in-memory one). */
     store?: WaStore
-    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage' | 'fetchPendingAlerts' | 'fetchBlacklist' | 'fetchJob'>
+    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage' | 'fetchPendingAlerts' | 'fetchBlacklist' | 'fetchJob' | 'fetchHistoryChats' | 'saveHistory'>
 }
 
 export interface Bot {
@@ -42,11 +42,12 @@ export function extractText(message?: Proto.IMessage | null): string | undefined
 /** Pictures bigger than this are not forwarded (the API's own limit is a little higher once base64-encoded). */
 export const MAX_IMAGE_BYTES = 5_000_000
 
-/** The message holding the picture: the one itself (an image sent with the command as caption) or the one it replies to. */
+/** The message holding the picture: the one itself (an image sent with the command as caption) or the one it replies
+ * to. A replied-to sticker counts too (!foto): a sticker has no caption, so it can only ever be the quoted one. */
 export function imageSource(message?: Proto.IMessage | null, event?: WaIncomingMessageEvent): Proto.IMessage | WaIncomingMessageEvent | undefined {
     if (message?.imageMessage) return event ?? message
     const quoted = message?.extendedTextMessage?.contextInfo?.quotedMessage
-    return quoted?.imageMessage ? quoted : undefined
+    return quoted?.imageMessage || quoted?.stickerMessage ? quoted : undefined
 }
 
 async function downloadImage(source: Proto.IMessage | WaIncomingMessageEvent): Promise<Uint8Array | undefined> {
@@ -69,6 +70,8 @@ export function toChatMessage(event: WaIncomingMessageEvent): ChatMessage | null
     if (!text) return null
     const { key } = event
     const source = imageSource(event.message, event)
+    const context = event.message?.extendedTextMessage?.contextInfo
+    const quotedText = extractText(context?.quotedMessage)
     return {
         chatJid: key.remoteJid,
         // In groups the sender is the participant; in 1:1 chats it is the chat itself.
@@ -79,6 +82,10 @@ export function toChatMessage(event: WaIncomingMessageEvent): ChatMessage | null
         mentionedJids: [...(event.message?.extendedTextMessage?.contextInfo?.mentionedJid ?? [])],
         isGroup: key.isGroup,
         fromMe: key.fromMe,
+        messageId: key.id,
+        ...(event.timestampSeconds ? { sentAtMs: event.timestampSeconds * 1000 } : {}),
+        ...(key.remoteJidAlt && !key.isGroup ? { chatAltJid: key.remoteJidAlt } : {}),
+        ...(quotedText ? { quoted: { text: quotedText, senderJid: context?.participant ?? undefined } } : {}),
         quoteRef: event,
         ...(source ? { getImage: () => downloadImage(source) } : {})
     }
@@ -245,18 +252,21 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
     })
 
     // Someone (re)joined a group: if they are on the blacklist they are taken out again right away.
-    client.on('group', (event) => {
-        const chatJid = event.groupJid ?? event.chatJid
-        if (event.action !== 'add' || !chatJid) return
-        void (async () => {
-            const blacklist = await tox.fetchBlacklist()
-            if (blacklist.length === 0) return
-            const removed = await sweepGroup(chatJid, blacklist)
-            if (removed.length > 0 && (config.allowedGroupJids.size === 0 || config.allowedGroupJids.has(chatJid))) {
-                await client.message.send(chatJid, '⛔ Estaba en la lista negra: lo saqué del grupo.')
-            }
-        })().catch((error) => logger.error('Blacklist check on join failed', { error: String(error) }))
-    })
+    // Not in the personal mode: that instance never acts on its own.
+    if (config.mode === 'groups') {
+        client.on('group', (event) => {
+            const chatJid = event.groupJid ?? event.chatJid
+            if (event.action !== 'add' || !chatJid) return
+            void (async () => {
+                const blacklist = await tox.fetchBlacklist()
+                if (blacklist.length === 0) return
+                const removed = await sweepGroup(chatJid, blacklist)
+                if (removed.length > 0 && (config.allowedGroupJids.size === 0 || config.allowedGroupJids.has(chatJid))) {
+                    await client.message.send(chatJid, '⛔ Estaba en la lista negra: lo saqué del grupo.')
+                }
+            })().catch((error) => logger.error('Blacklist check on join failed', { error: String(error) }))
+        })
+    }
 
     const pairing = createPairingController({
         phoneNumber: config.botPhoneNumber,
@@ -294,8 +304,10 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
         if (event.status === 'open') {
             attempt = 0
             logger.info('Connected to WhatsApp', { newLogin: event.isNewLogin })
-            // Anyone blacklisted who joined a group while the bot was offline.
-            void sweepAllGroups().catch((error) => logger.warn('Blacklist sweep on connect failed', { error: String(error) }))
+            // Anyone blacklisted who joined a group while the bot was offline (never from the personal number).
+            if (config.mode === 'groups') {
+                void sweepAllGroups().catch((error) => logger.warn('Blacklist sweep on connect failed', { error: String(error) }))
+            }
             return
         }
         if (stopping) return
@@ -327,7 +339,11 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
         async connect() {
             await client.connect()
             // Proactive alerts (e.g. !service health changes): checked on our own timer, no user message involved.
-            alertsTimer = setInterval(() => void pollAlerts(), config.alertsPollIntervalMs)
+            // The personal mode never does this: it would take the alerts of the groups bot and send them from the
+            // owner's own number.
+            if (config.mode === 'groups') {
+                alertsTimer = setInterval(() => void pollAlerts(), config.alertsPollIntervalMs)
+            }
         },
         async stop() {
             stopping = true

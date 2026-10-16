@@ -11,6 +11,7 @@
     "start": "node src/index.ts",
     "dev": "node --watch src/index.ts",
     "start:prod": "APP_ENV=prod node src/index.ts",
+    "start:personal": "node src/index.ts --mode=personal",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"test/**/*.test.ts\""
   },

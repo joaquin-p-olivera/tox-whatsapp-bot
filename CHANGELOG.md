@@ -9,6 +9,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Forwards the text of the message a command replies to, with who wrote it (`quoted`; the bot's own message is flagged), so `!claude` can answer about it.
+- Both modes: forwards the text (and captions) of the chats that have history on (`GET /api/v1/history/chats`, `POST /api/v1/history`), with the message id, time and both ids of a private chat. Commands (`.b ...` / `!...`) and the bot's own answers are skipped.
+- Personal mode (`npm run start:personal`, `--mode=personal`): runs on the owner's own number and answers only their own `.b <command>` messages in private chats and in the groups listed in `PERSONAL_GROUP_JIDS` (none by default), flagged `personal` for the API. Never acts on its own there (no alerts polling, no blacklist sweeps or group events). Reads only `.env.personal`; its session defaults to `tox-personal` / `.auth-personal`. The default stays the groups mode.
 - Follows long-running commands (`!claude`): a reply with a `job` is sent right away and the bot polls `GET /api/v1/jobs/{id}` until the answer is ready, then sends it quoting the command.
 - Moderation: removes members when a reply asks for it (`remove`, needs the bot to be a group admin) and enforces the API's blacklist (`!permaban`): sweeps every group it is in when asked and on connect, and checks a group whenever someone is added to it. Forwards each tagged person's aliases and group-admin status from the roster.
 - Forwards the picture a command message carries or replies to (up to 5 MB, base64 in the optional `image` field), so `!sticker` can turn it into a sticker. Only downloaded for messages that are being forwarded.
