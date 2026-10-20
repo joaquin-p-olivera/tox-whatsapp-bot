@@ -275,6 +275,19 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         ownReplies.set(`${chatJid}\n${text}`, now)
     }
 
+    /** The chats the API keeps the history of, looked up again at most every HISTORY_REFRESH_MS. */
+    async function refreshHistoryChats(): Promise<void> {
+        if (!tox.fetchHistoryChats || Date.now() - historyFetchedAt <= HISTORY_REFRESH_MS) return
+        historyChats = new Set(await tox.fetchHistoryChats())
+        historyFetchedAt = Date.now()
+    }
+
+    /** Whether this chat is one of those, which is also the only kind the API can read: ordinary chatter is forwarded
+     * from those alone, since they are the only ones it has any context to butt into. */
+    function historyIsOn(message: ChatMessage): boolean {
+        return [message.chatJid, message.chatAltJid].some((id) => !!id && historyChats.has(id))
+    }
+
     async function saveIfWanted(message: ChatMessage, selfIds: string[]): Promise<void> {
         const text = message.text.trim()
         if (!text || !message.messageId || !tox.fetchHistoryChats || !tox.saveHistory) return
@@ -285,10 +298,7 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             if (ownReplies.delete(`${message.chatJid}\n${message.text}`)) return // its answer, back as the owner's message
         }
 
-        if (Date.now() - historyFetchedAt > HISTORY_REFRESH_MS) {
-            historyChats = new Set(await tox.fetchHistoryChats())
-            historyFetchedAt = Date.now()
-        }
+        await refreshHistoryChats()
         const chatId = [message.chatJid, message.chatAltJid].find((id) => id && historyChats.has(id))
         if (!chatId) return
 
@@ -316,6 +326,8 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         const text = message.text.trim()
         const selfIds = (getSelfJids?.() ?? []).map(stripDevice)
         const selfJids = new Set(selfIds)
+        // Nobody asked the bot anything with this message: it is forwarded for the API to read, not to act on.
+        let chatter = false
         // Before (and apart from) the commands: every message of a chat with history on, whoever wrote it.
         void saveIfWanted(message, selfIds).catch((error) =>
             logger.warn('Could not save a message of the history', { error: String(error) })
@@ -334,9 +346,17 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             } else if (!isPrivateChat(message.chatJid)) return
         } else {
             if (message.fromMe) return
-            // Cheap local filter: don't call the API for ordinary chatter. A reply to the bot is not chatter: it is a
-            // question for Claude, so it goes to the API even without a prefix.
-            if (!text || !(startsWithPrefix(text) || repliesToBot(message, selfJids))) return
+            // Cheap local filter: a command, or a reply to the bot (a question for Claude, prefix or not), always goes
+            // to the API. So does ordinary chatter of a group whose history is on, which is the only thing the API can
+            // read: now and then it butts in with a remark of its own (CLAUDE_INTERJECT_CHANCE), and otherwise says
+            // nothing. Anything else stops here.
+            if (!text) return
+            chatter = !startsWithPrefix(text) && !repliesToBot(message, selfJids)
+            if (chatter) {
+                if (!message.isGroup) return
+                await refreshHistoryChats()
+                if (!historyIsOn(message)) return
+            }
 
             if (message.isGroup) {
                 if (config.allowedGroupJids.size > 0 && !config.allowedGroupJids.has(message.chatJid)) {
@@ -358,7 +378,8 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         }
         let replies: ToxReply[]
         try {
-            const image = await loadImage(message)
+            // Chatter is forwarded to be read: downloading the picture of every photo somebody sends would be waste.
+            const image = chatter ? undefined : await loadImage(message)
             const group = await inspectGroup(message, senderId)
             replies = await tox.sendMessage({
                 platform: 'whatsapp',

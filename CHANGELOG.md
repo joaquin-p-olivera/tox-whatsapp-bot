@@ -9,6 +9,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Forwards the ordinary chatter of the groups whose history is on (pictures excluded: nothing asked for them), so the API can read the conversation and butt in with a remark of its own now and then.
 - Forwards the text of the message a command replies to, with who wrote it (`quoted`; the bot's own message is flagged), so `!claude` can answer about it. A reply to one of the bot's own messages is forwarded even without a command prefix (the API answers it with Claude), and a quoted message with no text (a voice note) is forwarded as an empty one.
 - Both modes: forwards the text (and captions) of the chats that have history on (`GET /api/v1/history/chats`, `POST /api/v1/history`), with the message id, time and both ids of a private chat. Commands (`.b ...` / `!...`) and the bot's own answers are skipped.
 - Personal mode (`npm run start:personal`, `--mode=personal`): runs on the owner's own number and answers only their own `.b <command>` messages in private chats and in the groups listed in `PERSONAL_GROUP_JIDS` (none by default), flagged `personal` for the API. Never acts on its own there (no alerts polling, no blacklist sweeps or group events). Reads only `.env.personal`; its session defaults to `tox-personal` / `.auth-personal`. The default stays the groups mode.

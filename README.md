@@ -114,6 +114,9 @@ git-ignored, keep it private.
 - Ignores its own messages, non-text messages and anything that doesn't start with a command prefix — except a reply to one of
   its own messages, which goes to the API with no prefix: that is how the API lets people talk to Claude by just replying
   (`CLAUDE_ON_REPLY`). In the personal mode nothing changes: only the owner's `.b <command>` is forwarded.
+- Ordinary chatter is forwarded too, but only from a **group whose history is on** (`GET /api/v1/history/chats`, looked up again
+  every 15 s): the API reads it and now and then answers with a remark of its own (`CLAUDE_INTERJECT_CHANCE`), and otherwise
+  with nothing. Nobody asked for anything there, so the picture of such a message is never downloaded.
 - Replies are quoted (the first one), so it's clear who asked.
 - When a message replies to another one, that text goes to the API too (`quoted`, with who wrote it; the bot's own message is
   flagged), so `!claude` can answer about it. A quoted message with no text (a voice note) is forwarded as an empty one, which

@@ -227,6 +227,25 @@ test('in the personal mode a reply to an own message is still not a command', as
     assert.deepEqual(apiCalls, [])
 })
 
+test('ordinary chatter is forwarded only from a group whose history is on, and its picture is not downloaded', async () => {
+    const group = '120363000000000001@g.us'
+    const { handle, apiCalls } = setup({ history: [group] })
+    let downloaded = 0
+    await handle(makeMessage({ text: 'hola a todos', getImage: async () => (downloaded++, new Uint8Array([1])) }))
+    await handle(makeMessage({ text: 'hola a todos', chatJid: '120363000000000002@g.us' })) // history off there
+    await handle(makeMessage({ text: 'hola', isGroup: false, chatJid: '59899111111@s.whatsapp.net' })) // not a group
+
+    assert.deepEqual(apiCalls.map((call) => call.chat_id), [group])
+    assert.equal(apiCalls[0]?.image, undefined)
+    assert.equal(downloaded, 0, 'nobody asked for anything: downloading every photo of the group would be waste')
+})
+
+test('a command still carries its picture, chatter or not', async () => {
+    const { handle, apiCalls } = setup({ history: ['120363000000000001@g.us'] })
+    await handle(makeMessage({ text: '!sticker', getImage: async () => new Uint8Array([1, 2, 3]) }))
+    assert.equal(apiCalls[0]?.image, Buffer.from([1, 2, 3]).toString('base64'))
+})
+
 test('reports whether the sender administers THIS group, by any of their JIDs', async () => {
     const group = (senderIsAdmin: boolean) => [
         member('198765432100@lid', { isAdmin: senderIsAdmin, aliases: ['198765432100@lid', '59899111111@s.whatsapp.net'] }),
@@ -794,7 +813,8 @@ test('the groups mode saves what the others say in a group that has history on, 
     await handle(makeMessage({ text: 'otro grupo', messageId: 'F4', chatJid: '120363000000000002@g.us' })) // not on
     await flush()
 
-    assert.equal(apiCalls.length, 1) // only the command went to the API as a message
+    // The command, and the chatter of the group that has history on (the API reads it and may butt in); not the others.
+    assert.deepEqual(apiCalls.map((call) => call.text), ['hola a todos', '!ping'])
     assert.deepEqual(historySaved.map((m) => [m.chat_id, m.message_id, m.sender_id, m.sender_name, m.text]), [
         [group, 'F1', '198765432100@lid', 'Bob', 'hola a todos']
     ])
