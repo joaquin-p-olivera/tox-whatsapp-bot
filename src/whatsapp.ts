@@ -85,7 +85,8 @@ export function toChatMessage(event: WaIncomingMessageEvent): ChatMessage | null
         messageId: key.id,
         ...(event.timestampSeconds ? { sentAtMs: event.timestampSeconds * 1000 } : {}),
         ...(key.remoteJidAlt && !key.isGroup ? { chatAltJid: key.remoteJidAlt } : {}),
-        ...(quotedText ? { quoted: { text: quotedText, senderJid: context?.participant ?? undefined } } : {}),
+        // A replied-to message with no text counts too (the bot's own voice notes): replying to one talks to the bot.
+        ...(context?.quotedMessage ? { quoted: { text: quotedText ?? '', senderJid: context.participant ?? undefined } } : {}),
         quoteRef: event,
         ...(source ? { getImage: () => downloadImage(source) } : {})
     }

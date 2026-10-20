@@ -153,6 +153,18 @@ test('a reaction reply reacts to the command message and sends nothing else', as
     assert.equal(sent.length, 0)
 })
 
+test('an empty reaction takes the earlier one off, and no reaction field leaves them alone', async () => {
+    const cleared = setup({ replies: [plain('Listo.'), { text: '', mentions: [], reaction: '' }] })
+    const message = makeMessage({ text: '!claude dale' })
+    await cleared.handle(message)
+    assert.deepEqual(cleared.reactionsSent, [{ jid: message.chatJid, emoji: '', target: message.quoteRef }])
+    assert.deepEqual(cleared.sent.map((s) => s.text), ['Listo.'])
+
+    const plainReply = setup()
+    await plainReply.handle(makeMessage({ text: '!ping' }))
+    assert.deepEqual(plainReply.reactionsSent, [])
+})
+
 test('a tag of the bot itself is flagged as is_bot, whichever form of its JID was used', async () => {
     const calls: ToxMessage[] = []
     const handle = createMessageHandler({
@@ -184,6 +196,35 @@ test('forwards the replied-to text with who wrote it, and marks the bot\'s own m
     assert.deepEqual(apiCalls[0]?.quoted, { text: 'Mañana no llego', user_id: '111@lid' })
     assert.deepEqual(apiCalls[1]?.quoted, { text: 'Hola', user_id: '999@lid', is_bot: true })
     assert.equal(apiCalls[2]?.quoted, undefined)
+})
+
+test('a reply to the bot goes to the API with no prefix at all (it is a question for Claude)', async () => {
+    const { handle, apiCalls } = setup()
+    await handle(makeMessage({ text: 'y eso qué quiere decir?', quoted: { text: 'Listo.', senderJid: '999:3@lid' } }))
+    assert.equal(apiCalls[0]?.text, 'y eso qué quiere decir?')
+    assert.deepEqual(apiCalls[0]?.quoted, { text: 'Listo.', user_id: '999@lid', is_bot: true })
+})
+
+test('a reply to the bot with no text in it (a voice note) still reaches the API', async () => {
+    const { handle, apiCalls } = setup()
+    await handle(makeMessage({ text: 'jajaja', quoted: { text: '', senderJid: '598000:3@s.whatsapp.net' } }))
+    assert.equal(apiCalls.length, 1)
+    assert.deepEqual(apiCalls[0]?.quoted, { text: '', user_id: '598000@s.whatsapp.net', is_bot: true })
+})
+
+test('a prefix-less reply to somebody else is ordinary chatter: the API is never called', async () => {
+    const { handle, apiCalls } = setup()
+    await handle(makeMessage({ text: 'jajaja', quoted: { text: 'Mañana no llego', senderJid: '111:7@lid' } }))
+    await handle(makeMessage({ text: 'jajaja' })) // no reply at all
+    await handle(makeMessage({ text: 'y eso?', quoted: { text: 'Listo.' } })) // WhatsApp didn't say who wrote it
+    assert.deepEqual(apiCalls, [])
+})
+
+test('in the personal mode a reply to an own message is still not a command', async () => {
+    const { handle, apiCalls } = setup({ config: { mode: 'personal' } })
+    await handle(makeMessage({ text: 'y eso?', fromMe: true, isGroup: false, chatJid: '59899111111@s.whatsapp.net',
+        quoted: { text: 'Listo.', senderJid: '999:3@lid' } }))
+    assert.deepEqual(apiCalls, [])
 })
 
 test('reports whether the sender administers THIS group, by any of their JIDs', async () => {

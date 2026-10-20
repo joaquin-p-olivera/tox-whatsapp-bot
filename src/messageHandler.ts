@@ -45,6 +45,7 @@ export type SendText = (chatJid: string, text: string, options?: SendOptions) =>
 export type SendAudio = (chatJid: string, audio: ToxAudio, options?: SendOptions) => Promise<void>
 export type SendSticker = (chatJid: string, sticker: ToxSticker, options?: SendOptions) => Promise<void>
 export type SendImage = (chatJid: string, image: ToxImage, options?: SendOptions) => Promise<void>
+/** An empty `emoji` revokes the reaction the bot left on that message. */
 export type SendReaction = (chatJid: string, emoji: string, target: unknown) => Promise<void>
 /** Removes members (by the ids the API knows them under) from a group. Throws when it can't (e.g. the bot is not an admin). */
 export type RemoveMembers = (chatJid: string, userIds: string[]) => Promise<void>
@@ -113,6 +114,14 @@ export const PERSONAL_PREFIX = '.b '
 /** The chats of a person (not a group, a broadcast list, a status or a channel). */
 function isPrivateChat(chatJid: string): boolean {
     return chatJid.endsWith('@s.whatsapp.net') || chatJid.endsWith('@lid')
+}
+
+/** Whether the message replies to one of the bot's own messages. That is another way of asking Claude (the API decides,
+ * see CLAUDE_ON_REPLY): no prefix needed, the reply itself is the question. WhatsApp names the author of the quoted
+ * message in groups; when it doesn't, the reply is treated as ordinary chatter. */
+function repliesToBot(message: ChatMessage, selfJids: Set<string>): boolean {
+    const author = message.quoted?.senderJid
+    return Boolean(author && selfJids.has(stripDevice(author)))
 }
 
 /** The replied-to message for the API. In the personal mode the own account is the owner, not the bot. */
@@ -190,8 +199,9 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
                         continue
                     }
                 }
-                if (reply.reaction) {
-                    // Always reacts to the command message itself, whichever reply of the list carries it.
+                if (reply.reaction !== undefined) {
+                    // Always reacts to the command message itself, whichever reply of the list carries it. An empty
+                    // emoji takes the reaction off again (that is how !claude clears its ⏳ once the answer is sent).
                     await sendReaction(message.chatJid, reply.reaction, message.quoteRef)
                 }
                 if (reply.audio) {
@@ -304,8 +314,10 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
 
     return async function handleMessage(message: ChatMessage): Promise<void> {
         const text = message.text.trim()
+        const selfIds = (getSelfJids?.() ?? []).map(stripDevice)
+        const selfJids = new Set(selfIds)
         // Before (and apart from) the commands: every message of a chat with history on, whoever wrote it.
-        void saveIfWanted(message, (getSelfJids?.() ?? []).map(stripDevice)).catch((error) =>
+        void saveIfWanted(message, selfIds).catch((error) =>
             logger.warn('Could not save a message of the history', { error: String(error) })
         )
         if (personal) {
@@ -322,8 +334,9 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             } else if (!isPrivateChat(message.chatJid)) return
         } else {
             if (message.fromMe) return
-            // Cheap local filter: don't call the API for ordinary chatter.
-            if (!text || !startsWithPrefix(text)) return
+            // Cheap local filter: don't call the API for ordinary chatter. A reply to the bot is not chatter: it is a
+            // question for Claude, so it goes to the API even without a prefix.
+            if (!text || !(startsWithPrefix(text) || repliesToBot(message, selfJids))) return
 
             if (message.isGroup) {
                 if (config.allowedGroupJids.size > 0 && !config.allowedGroupJids.has(message.chatJid)) {
@@ -338,13 +351,11 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             }
         }
 
-        const selfIds = (getSelfJids?.() ?? []).map(stripDevice)
         const senderId = senderOf(message, selfIds)
         if (!senderId) {
             logger.warn('Ignoring a personal command: the own account is not known yet')
             return
         }
-        const selfJids = new Set(selfIds)
         let replies: ToxReply[]
         try {
             const image = await loadImage(message)

@@ -111,9 +111,13 @@ git-ignored, keep it private.
 
 ## Behaviour
 
-- Ignores its own messages, non-text messages and anything that doesn't start with a command prefix.
+- Ignores its own messages, non-text messages and anything that doesn't start with a command prefix — except a reply to one of
+  its own messages, which goes to the API with no prefix: that is how the API lets people talk to Claude by just replying
+  (`CLAUDE_ON_REPLY`). In the personal mode nothing changes: only the owner's `.b <command>` is forwarded.
 - Replies are quoted (the first one), so it's clear who asked.
-- When a command replies to a text message, that text goes to the API too (`quoted`, with who wrote it; the bot's own message is flagged), so `!claude` can answer about it.
+- When a message replies to another one, that text goes to the API too (`quoted`, with who wrote it; the bot's own message is
+  flagged), so `!claude` can answer about it. A quoted message with no text (a voice note) is forwarded as an empty one, which
+  is what tells the API that somebody replied to the bot's own voice note.
 - If the API is unreachable, the chat gets `⚠️ Tox no está disponible en este momento…`.
 - In groups it sends the member list (cached 5 minutes, bot excluded) so the API can pick a random member for `!m`. The sender is excluded whichever JID form (LID or phone number) the group uses. If the list can't be fetched, the API falls back to the users it has seen.
 - Audio replies (`!m`) are downloaded from the API and sent as audio: Ogg/Opus goes out as a voice note, m4a/mp3 as a plain audio file. If the download fails, it's logged and nothing is sent.
