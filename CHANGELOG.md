@@ -9,6 +9,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `start_dev.sh`: installs the dependencies when they are missing, checks the env file of the mode it is starting (`.env`, `.env.personal`, `.env.prod`) and `exec`s the bot. It is what the `tox-bot` and `tox-bot-personal` systemd user units run; the README says how to enable them (the units themselves live in `~/.config/systemd/user/`, outside the repo).
 - Forwards the ordinary chatter of the groups whose history is on (pictures excluded: nothing asked for them), so the API can read the conversation and butt in with a remark of its own now and then.
 - Forwards the text of the message a command replies to, with who wrote it (`quoted`; the bot's own message is flagged), so `!claude` can answer about it. A reply to one of the bot's own messages is forwarded even without a command prefix (the API answers it with Claude), and a quoted message with no text (a voice note) is forwarded as an empty one.
 - Both modes: forwards the text (and captions) of the chats that have history on (`GET /api/v1/history/chats`, `POST /api/v1/history`), with the message id, time and both ids of a private chat. Commands (`.b ...` / `!...`) and the bot's own answers are skipped.

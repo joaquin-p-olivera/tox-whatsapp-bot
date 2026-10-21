@@ -66,13 +66,32 @@ Until you set it, the bot answers in every group it's in. Private chats are igno
 
 | | Groups (default) | Personal |
 | --- | --- | --- |
-| Start | `npm start` / `npm run start:prod` | `npm run start:personal` (= `node src/index.ts --mode=personal`) |
+| Start | `npm start` / `./start_dev.sh` | `npm run start:personal` / `./start_dev.sh --mode=personal` |
 | Account | the dedicated bot account | your own number, linked as a device |
 | Where | WhatsApp groups | your private chats, and the groups you list in `PERSONAL_GROUP_JIDS` |
 | Who | anyone in the group | only you (what you type yourself) |
 | Command | `!sticker`, `!voz -h Hola` | `.b sticker`, `.b voz -h Hola` |
 | Env file | `.env` / `.env.prod` | `.env.personal` only |
 | Admin commands | per `ADMIN_USER_IDS` | never: the reply is visible to the other person |
+
+`./start_dev.sh` is the same thing with the chores done for you: it installs the dependencies when `node_modules`
+is missing, checks that the env file it is going to read exists, and `exec`s the bot. It is also what the services
+below run.
+
+### Running it as a service
+
+Two `systemd` user units (no `sudo`, and they start at boot thanks to `loginctl enable-linger`) live outside this
+repo, in `~/.config/systemd/user/`: `tox-bot.service` and `tox-bot-personal.service`, each running `./start_dev.sh`.
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now tox-bot.service tox-bot-personal.service
+systemctl --user status tox-bot.service
+journalctl --user -u tox-bot.service -f          # the log (-n 200 for the last lines)
+```
+
+Never run a mode twice (the service **and** `npm start`): both instances use the same `.auth`, and WhatsApp throws
+one of them out over and over — `stream_error_replaced` in the log.
 
 The personal instance **never acts on its own**: no alerts (it would otherwise take the groups bot's queue and send it
 from your number) and no blacklist sweeps. `!recordar` is refused there for the same reason. Groups are ignored
