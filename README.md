@@ -136,6 +136,12 @@ git-ignored, keep it private.
 - Ordinary chatter is forwarded too, but only from a **group whose history is on** (`GET /api/v1/history/chats`, looked up again
   every 15 s): the API reads it and now and then answers with a remark of its own (`CLAUDE_INTERJECT_CHANCE`), and otherwise
   with nothing. Nobody asked for anything there, so the picture of such a message is never downloaded.
+- **Censorship** (`!censura`, groups mode only): before anything else — the history included — a group message is
+  checked against the list of censored people (`GET /api/v1/censored`, read again at most every 15 s and right after
+  any command). Theirs is deleted for everyone and goes no further: not forwarded, not saved, no reply. WhatsApp only
+  lets an **admin of the group** delete somebody else's message, so without that the deletion fails; the group is then
+  told once per run and every failure is logged. If the list can't be read the last one stays in force, so an API
+  restart does not quietly lift it.
 - Replies are quoted (the first one), so it's clear who asked.
 - When a message replies to another one, that text goes to the API too (`quoted`, with who wrote it; the bot's own message is
   flagged), so `!claude` can answer about it. A quoted message with no text (a voice note) is forwarded as an empty one, which

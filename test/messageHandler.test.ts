@@ -3,6 +3,7 @@ import { test } from 'node:test'
 
 import {
     API_DOWN_REPLY,
+    CENSORSHIP_FAILED_REPLY,
     JOB_LOST_REPLY,
     REMOVE_FAILED_REPLY,
     createMessageHandler,
@@ -12,7 +13,7 @@ import {
     type GroupMember,
     type SendOptions
 } from '../src/messageHandler.ts'
-import type { ToxAudio, ToxHistoryMessage, ToxImage, ToxMessage, ToxReply, ToxSticker } from '../src/toxClient.ts'
+import type { CensoredChat, ToxAudio, ToxHistoryMessage, ToxImage, ToxMessage, ToxReply, ToxSticker } from '../src/toxClient.ts'
 import { makeConfig, makeMessage, silentLogger } from './helpers.ts'
 
 const plain = (text: string): ToxReply => ({ text, mentions: [] })
@@ -27,6 +28,12 @@ interface SetupOptions {
     imageFails?: boolean
     /** Chat ids the API says have history turned on (enables the history calls of the fake API). */
     history?: string[]
+    /** Who the API says is censored, by chat (enables the censored call of the fake API). */
+    censored?: CensoredChat[]
+    /** The censored list cannot be read. */
+    censoredFails?: boolean
+    /** Deleting a message is refused, as WhatsApp does when the bot is not an admin. */
+    deleteFails?: boolean
 }
 
 function setup(options: SetupOptions = {}) {
@@ -40,6 +47,8 @@ function setup(options: SetupOptions = {}) {
     const imagesSent: { jid: string; image: ToxImage; options: SendOptions | undefined }[] = []
     const reactionsSent: { jid: string; emoji: string; target: unknown }[] = []
     const historySaved: ToxHistoryMessage[] = []
+    const deleted: { jid: string; target: unknown }[] = []
+    let censoredReads = 0
     const { members } = options
     const handle = createMessageHandler({
         config: makeConfig(options.config),
@@ -70,7 +79,20 @@ function setup(options: SetupOptions = {}) {
             },
             async saveHistory(messages) {
                 historySaved.push(...messages)
-            }
+            },
+            ...(options.censored || options.censoredFails
+                ? {
+                      async fetchCensored() {
+                          censoredReads += 1
+                          if (options.censoredFails) throw new Error('censored 500')
+                          return options.censored ?? []
+                      }
+                  }
+                : {})
+        },
+        async deleteMessage(jid, target) {
+            if (options.deleteFails) throw new Error('not an admin')
+            deleted.push({ jid, target })
         },
         getSelfJids: () => ['999:3@lid', '598000:3@s.whatsapp.net'],
         getGroupMembers: members
@@ -95,7 +117,7 @@ function setup(options: SetupOptions = {}) {
             reactionsSent.push({ jid, emoji, target })
         }
     })
-    return { handle, apiCalls, sent, audiosFetched, audiosSent, stickersFetched, stickersSent, imagesFetched, imagesSent, reactionsSent, historySaved }
+    return { handle, apiCalls, sent, audiosFetched, audiosSent, stickersFetched, stickersSent, imagesFetched, imagesSent, reactionsSent, historySaved, deleted, censoredReads: () => censoredReads }
 }
 
 const member = (id: string, extra: Partial<GroupMember> = {}): GroupMember => ({ userId: id, aliases: [id], ...extra })
@@ -820,3 +842,85 @@ test('the groups mode saves what the others say in a group that has history on, 
     ])
 })
 
+
+// --- Censorship (!censura): the bot deletes, the API only keeps the list ---
+
+const CHAT = '120363000000000001@g.us'
+const SENDER = '198765432100@lid' // makeMessage's sender, without its device segment
+
+test('deletes every message of a censored user and forwards nothing', async () => {
+    const { handle, deleted, apiCalls, historySaved, sent } = setup({
+        censored: [{ chat_id: CHAT, user_ids: [SENDER] }],
+        history: [CHAT]
+    })
+    const chatter = makeMessage({ text: 'hola a todos', messageId: 'm1' })
+    await handle(chatter)
+    assert.deepEqual(deleted, [{ jid: CHAT, target: chatter.quoteRef }])
+    // Not forwarded, not saved to the history, and the group is not told anything
+    assert.deepEqual(apiCalls, [])
+    assert.deepEqual(historySaved, [])
+    assert.deepEqual(sent, [])
+
+    // A command of theirs is deleted too, and never runs
+    await handle(makeMessage({ text: '!ping' }))
+    assert.equal(deleted.length, 2)
+    assert.deepEqual(apiCalls, [])
+})
+
+test('leaves everybody else in the chat alone', async () => {
+    const { handle, deleted, apiCalls } = setup({ censored: [{ chat_id: CHAT, user_ids: ['someone-else@lid'] }] })
+    await handle(makeMessage())
+    assert.deepEqual(deleted, [])
+    assert.equal(apiCalls.length, 1)
+})
+
+test('censorship is per chat', async () => {
+    const { handle, deleted, apiCalls } = setup({ censored: [{ chat_id: 'another@g.us', user_ids: [SENDER] }] })
+    await handle(makeMessage())
+    assert.deepEqual(deleted, [])
+    assert.equal(apiCalls.length, 1)
+})
+
+test('matches a censored user under their other id', async () => {
+    const { handle, deleted } = setup({ censored: [{ chat_id: CHAT, user_ids: ['59899123456@s.whatsapp.net'] }] })
+    await handle(makeMessage({ senderAltJid: '59899123456:4@s.whatsapp.net' }))
+    assert.equal(deleted.length, 1)
+})
+
+test('says once per group that it could not delete, and keeps trying', async () => {
+    const { handle, deleted, sent } = setup({ censored: [{ chat_id: CHAT, user_ids: [SENDER] }], deleteFails: true })
+    await handle(makeMessage({ text: 'uno' }))
+    await handle(makeMessage({ text: 'dos' }))
+    assert.deepEqual(deleted, [])
+    // The notice is not repeated with every message, and the messages are still not forwarded
+    assert.deepEqual(sent, [{ jid: CHAT, text: CENSORSHIP_FAILED_REPLY, options: undefined }])
+})
+
+test('keeps the last censored list when the API cannot be read', async () => {
+    const { handle, deleted } = setup({ censoredFails: true, censored: [{ chat_id: CHAT, user_ids: [SENDER] }] })
+    // The very first read fails: nothing is deleted on a guess
+    await handle(makeMessage())
+    assert.deepEqual(deleted, [])
+})
+
+test('the personal mode never censors anybody', async () => {
+    const { handle, deleted } = setup({
+        config: { mode: 'personal', personalGroupJids: new Set([CHAT]) },
+        censored: [{ chat_id: CHAT, user_ids: [SENDER] }]
+    })
+    await handle(makeMessage({ text: '.b ping', fromMe: true }))
+    assert.deepEqual(deleted, [])
+})
+
+test('reads the censored list again right after a command, and caches it otherwise', async () => {
+    const { handle, censoredReads } = setup({ censored: [] })
+    // A command may have just censored somebody (!censura), so the list is read again with the next message
+    await handle(makeMessage({ text: '!ping' }))
+    const afterCommand = censoredReads()
+    await handle(makeMessage({ text: 'hola' }))
+    assert.equal(censoredReads(), afterCommand + 1)
+    // ...but two plain messages in a row, with no command in between, do not read it twice
+    const cached = censoredReads()
+    await handle(makeMessage({ text: 'y otra cosa' }))
+    assert.equal(censoredReads(), cached)
+})

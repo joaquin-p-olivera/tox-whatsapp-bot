@@ -9,6 +9,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Censorship (`!censura`): every group message is checked against who the API says is censored there (`GET /api/v1/censored`, cached 15 s and re-read right after any command) and deleted for everyone before it is forwarded or saved, commands included. It needs the bot to be an admin of the group, which is what WhatsApp asks to delete somebody else's message; when it fails the group is told once per run. The personal mode never censors.
 - `start_dev.sh`: installs the dependencies when they are missing, checks the env file of the mode it is starting (`.env`, `.env.personal`, `.env.prod`) and `exec`s the bot. It is what the `tox-bot` and `tox-bot-personal` systemd user units run; the README says how to enable them (the units themselves live in `~/.config/systemd/user/`, outside the repo).
 - Forwards the ordinary chatter of the groups whose history is on (pictures excluded: nothing asked for them), so the API can read the conversation and butt in with a remark of its own now and then.
 - Forwards the text of the message a command replies to, with who wrote it (`quoted`; the bot's own message is flagged), so `!claude` can answer about it. A reply to one of the bot's own messages is forwarded even without a command prefix (the API answers it with Claude), and a quoted message with no text (a voice note) is forwarded as an empty one.

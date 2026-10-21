@@ -83,6 +83,12 @@ export interface ToxImage {
 
 /** A proactive message the bot must send on its own, with no user message behind it.
  * `{@0}`, `{@1}`... in `text` stand for `mentions[0]`, `mentions[1]`..., same as ToxReply. */
+/** One chat with people under censorship in it, with every id each of them may appear under (LID, phone number). */
+export interface CensoredChat {
+    chat_id: string
+    user_ids: string[]
+}
+
 export interface PendingAlert {
     chat_id: string
     text: string
@@ -209,6 +215,12 @@ export class ToxClient {
     async fetchBlacklist(): Promise<BlacklistEntry[]> {
         const response = await this.get('/api/v1/blacklist?platform=whatsapp', 'blacklist')
         return (await response.json()) as BlacklistEntry[]
+    }
+
+    /** Who is under censorship (!censura), by chat: every message those people send there is deleted. */
+    async fetchCensored(): Promise<CensoredChat[]> {
+        const response = await this.get('/api/v1/censored?platform=whatsapp', 'censored users')
+        return (await response.json()) as CensoredChat[]
     }
 
     /** The chat ids (aliases included) that have history turned on: only their messages are worth forwarding. */

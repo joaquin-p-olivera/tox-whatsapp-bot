@@ -54,6 +54,12 @@ before(async () => {
             res.end('{"chats":[]}')
             return
         }
+        // GET /api/v1/censored: nobody is censored (the bot asks on every group message)
+        if (req.method === 'GET' && req.url?.startsWith('/api/v1/censored')) {
+            res.setHeader('content-type', 'application/json')
+            res.end('[]')
+            return
+        }
         // GET /api/v1/stickers/<id>: serve a fake webp
         if (req.method === 'GET' && req.url?.startsWith('/api/v1/stickers/')) {
             stickerRequests.push({ url: req.url, apiKey: req.headers['x-api-key'] as string | undefined })

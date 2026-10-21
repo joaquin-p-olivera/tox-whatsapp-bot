@@ -16,7 +16,7 @@ export interface BotOptions {
     clientOptions?: Partial<WaClientOptions>
     /** Replaces the persistent SQLite store (tests use an in-memory one). */
     store?: WaStore
-    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage' | 'fetchPendingAlerts' | 'fetchBlacklist' | 'fetchJob' | 'fetchHistoryChats' | 'saveHistory'>
+    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage' | 'fetchPendingAlerts' | 'fetchBlacklist' | 'fetchJob' | 'fetchHistoryChats' | 'saveHistory' | 'fetchCensored'>
 }
 
 export interface Bot {
@@ -232,6 +232,11 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
         },
         sendReaction: async (chatJid, emoji, target) => {
             await client.message.send(chatJid, { type: 'reaction', emoji, target: target as WaIncomingMessageEvent })
+        },
+        // "Delete for everyone". WhatsApp only allows it on somebody else's message to an admin of the group, so this
+        // throws when the bot is not one, and the handler says so in the group.
+        deleteMessage: async (chatJid, target) => {
+            await client.message.send(chatJid, { type: 'revoke', target: target as WaIncomingMessageEvent })
         },
         sendText: async (chatJid, text, { quoteRef, mentionJids } = {}) => {
             // A URL on a private address (e.g. !fred's http://192.168.1.21:5200) only becomes tappable if the message carries

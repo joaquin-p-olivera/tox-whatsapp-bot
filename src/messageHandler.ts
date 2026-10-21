@@ -49,6 +49,9 @@ export type SendImage = (chatJid: string, image: ToxImage, options?: SendOptions
 export type SendReaction = (chatJid: string, emoji: string, target: unknown) => Promise<void>
 /** Removes members (by the ids the API knows them under) from a group. Throws when it can't (e.g. the bot is not an admin). */
 export type RemoveMembers = (chatJid: string, userIds: string[]) => Promise<void>
+/** Deletes a message for everyone (!censura). Throws when WhatsApp refuses, which is what happens to somebody
+ * else's message when the bot is not an admin of the group. */
+export type DeleteMessage = (chatJid: string, target: unknown) => Promise<void>
 export type GetGroupMembers = (chatJid: string) => Promise<GroupMember[]>
 
 export interface HandlerLogger {
@@ -61,11 +64,14 @@ export interface HandlerLogger {
 export const REMOVE_FAILED_REPLY = '⚠️ No pude sacarlo del grupo. ¿Soy admin del grupo?'
 export const JOB_LOST_REPLY = '⚠️ No pude obtener la respuesta (se perdió la consulta).'
 export const API_DOWN_REPLY = '⚠️ Tox no está disponible en este momento. Probá de nuevo en un rato.'
+/** Said once per group (per run): a censored message could not be deleted, and silence would look like the
+ * censorship simply not working. */
+export const CENSORSHIP_FAILED_REPLY = '⚠️ No pude borrar el mensaje de alguien que está censurado. ¿Soy admin del grupo?'
 
 interface Deps {
     config: Config
     tox: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage'> &
-        Partial<Pick<ToxClient, 'fetchJob' | 'fetchHistoryChats' | 'saveHistory'>>
+        Partial<Pick<ToxClient, 'fetchJob' | 'fetchHistoryChats' | 'saveHistory' | 'fetchCensored'>>
     sendText: SendText
     sendAudio: SendAudio
     sendSticker: SendSticker
@@ -78,6 +84,8 @@ interface Deps {
     removeMembers?: RemoveMembers
     /** Optional: removes everyone on the blacklist from every group the bot is in (!permaban). Failures are logged. */
     sweepBlacklist?: () => Promise<void>
+    /** Optional: deletes a message for everyone (!censura). Without it nothing is ever deleted. */
+    deleteMessage?: DeleteMessage
     /** Optional (tests): how long to wait between checks of a long-running job, and the most it is followed. */
     jobPollMs?: number
     jobMaxWaitMs?: number
@@ -134,7 +142,7 @@ function quotedOf(quoted: { text: string; senderJid?: string }, selfJids: Set<st
     }
 }
 
-export function createMessageHandler({ config, tox, sendText, sendAudio, sendSticker, sendImage, sendReaction, logger, getGroupMembers, getSelfJids, removeMembers, sweepBlacklist, jobPollMs = 2_000, jobMaxWaitMs = 15 * 60_000, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }: Deps) {
+export function createMessageHandler({ config, tox, sendText, sendAudio, sendSticker, sendImage, sendReaction, logger, getGroupMembers, getSelfJids, removeMembers, sweepBlacklist, deleteMessage, jobPollMs = 2_000, jobMaxWaitMs = 15 * 60_000, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }: Deps) {
     const startsWithPrefix = (text: string) => config.commandPrefixes.some((prefix) => text.startsWith(prefix))
 
     /** The group's member list for the API, plus whether the sender administers this group. When the roster can't be
@@ -288,6 +296,57 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         return [message.chatJid, message.chatAltJid].some((id) => !!id && historyChats.has(id))
     }
 
+    // --- Censorship: whose messages are deleted on sight (!censura). Groups mode only. ---
+    // Polled like the history list, and for the same reason: a censored person's ordinary chatter never reaches the
+    // API unless that chat has history on, so the deletion cannot be the API's answer to a forwarded message.
+    const CENSORED_REFRESH_MS = 15_000
+    let censoredChats = new Map<string, Set<string>>()
+    let censoredFetchedAt = 0
+    // Groups already told the bot cannot delete, so the notice is not repeated with every message.
+    const warnedCannotDelete = new Set<string>()
+
+    async function refreshCensored(): Promise<void> {
+        if (!tox.fetchCensored || Date.now() - censoredFetchedAt <= CENSORED_REFRESH_MS) return
+        try {
+            censoredChats = new Map((await tox.fetchCensored()).map((entry) => [entry.chat_id, new Set(entry.user_ids)]))
+            censoredFetchedAt = Date.now()
+        } catch (error) {
+            // The last list stays in force: an API restart must not quietly lift everyone's censorship. Until the
+            // first successful read it is empty, so nothing is deleted on a guess.
+            logger.warn('Could not read who is censored; keeping the last list', { error: String(error) })
+        }
+    }
+
+    /** Whether this message is from somebody under censorship in this chat, under any of their ids. */
+    function isCensored(message: ChatMessage): boolean {
+        const here = [message.chatJid, message.chatAltJid].flatMap((chat) => {
+            const censored = chat ? censoredChats.get(chat) : undefined
+            return censored ? [censored] : []
+        })
+        const sender = [message.senderJid, message.senderAltJid].filter((jid): jid is string => !!jid).map(stripDevice)
+        return here.some((censored) => sender.some((id) => censored.has(id)))
+    }
+
+    /** Deletes the message and reports whether it is gone. The group is told once per run when it cannot be done,
+     * since otherwise the censorship would look broken for no visible reason. */
+    async function censor(message: ChatMessage): Promise<void> {
+        try {
+            if (!deleteMessage) throw new Error('deleting messages is not available')
+            await deleteMessage(message.chatJid, message.quoteRef)
+            logger.info('Censored: message deleted', { chat: message.chatJid, sender: stripDevice(message.senderJid) })
+        } catch (error) {
+            logger.warn('Could not delete the message of a censored user (is the bot an admin there?)', {
+                chat: message.chatJid,
+                error: String(error)
+            })
+            if (warnedCannotDelete.has(message.chatJid)) return
+            warnedCannotDelete.add(message.chatJid)
+            await sendText(message.chatJid, CENSORSHIP_FAILED_REPLY).catch((sendError) =>
+                logger.warn('Could not say that the message could not be deleted', { error: String(sendError) })
+            )
+        }
+    }
+
     async function saveIfWanted(message: ChatMessage, selfIds: string[]): Promise<void> {
         const text = message.text.trim()
         if (!text || !message.messageId || !tox.fetchHistoryChats || !tox.saveHistory) return
@@ -328,6 +387,15 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         const selfJids = new Set(selfIds)
         // Nobody asked the bot anything with this message: it is forwarded for the API to read, not to act on.
         let chatter = false
+        // Censorship comes before everything else, the history included: a message that is being deleted is not
+        // conversation to save, and a command from a censored person is not a command to run.
+        if (!personal && message.isGroup && !message.fromMe) {
+            await refreshCensored()
+            if (isCensored(message)) {
+                await censor(message)
+                return
+            }
+        }
         // Before (and apart from) the commands: every message of a chat with history on, whoever wrote it.
         void saveIfWanted(message, selfIds).catch((error) =>
             logger.warn('Could not save a message of the history', { error: String(error) })
@@ -417,8 +485,10 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             replies = [{ text: API_DOWN_REPLY, mentions: [] }]
         }
 
-        // A command may have turned the history of this chat on or off: look at the list again with the next message.
+        // A command may have turned the history of this chat on or off, or censored somebody: look at both lists
+        // again with the next message instead of waiting for them to go stale.
         historyFetchedAt = 0
+        censoredFetchedAt = 0
         if (!(await deliver(message, replies))) return
         // A long-running command (!claude) answered with just a reaction: the real answer is picked up when it is ready,
         // without holding this handler (other commands keep working meanwhile).
