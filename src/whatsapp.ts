@@ -332,6 +332,16 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
     async function pollAlerts(): Promise<void> {
         try {
             for (const alert of await tox.fetchPendingAlerts()) {
+                if (alert.image) {
+                    try {
+                        const { data, mimetype } = await tox.fetchImage(alert.image)
+                        await client.message.send(alert.chat_id, { type: 'image', media: data, mimetype })
+                        continue
+                    } catch (error) {
+                        // The API could not serve it, or WhatsApp refused it: the text says the same thing.
+                        logger.warn('Could not send an alert image, falling back to its text', { error: String(error) })
+                    }
+                }
                 const { text, mentionJids } = renderMentions({ text: alert.text, mentions: alert.mentions })
                 await client.message.send(alert.chat_id, text, mentionJids.length ? { mentions: mentionJids } : undefined)
             }

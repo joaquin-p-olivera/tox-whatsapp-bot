@@ -142,6 +142,9 @@ git-ignored, keep it private.
   lets an **admin of the group** delete somebody else's message, so without that the deletion fails; the group is then
   told once per run and every failure is logged. If the list can't be read the last one stays in force, so an API
   restart does not quietly lift it.
+- **Proactive alerts** (groups mode only) are polled on the bot's own timer and may carry an **image** as well as text
+  (the API's GTA VI countdown card): the picture is downloaded and sent, and the row's text is what goes out instead
+  when it cannot be fetched or WhatsApp refuses it, so an alert is never lost to a picture.
 - Replies are quoted (the first one), so it's clear who asked.
 - When a message replies to another one, that text goes to the API too (`quoted`, with who wrote it; the bot's own message is
   flagged), so `!claude` can answer about it. A quoted message with no text (a voice note) is forwarded as an empty one, which

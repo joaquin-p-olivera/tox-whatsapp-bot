@@ -93,6 +93,8 @@ export interface PendingAlert {
     chat_id: string
     text: string
     mentions: ToxParticipant[]
+    /** Id of an image to send instead of `text` (e.g. the GTA VI countdown card); `text` is then the fallback. */
+    image?: string | null
 }
 
 /** A message of a chat that has history turned on (!h), as the API wants it saved. */
