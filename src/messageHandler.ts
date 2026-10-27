@@ -1,5 +1,5 @@
 import type { Config } from './config.ts'
-import { ToxApiError, type ToxAudio, type ToxClient, type ToxHistoryMessage, type ToxImage, type ToxParticipant, type ToxQuoted, type ToxReply, type ToxSticker } from './toxClient.ts'
+import { ToxApiError, type ToxAudio, type ToxClient, type ToxHistoryMessage, type ToxImage, type ToxParticipant, type ToxQuoted, type ToxReply, type ToxSticker, type ToxVideo } from './toxClient.ts'
 
 /** A chat message, normalised so this module knows nothing about the WhatsApp library. */
 export interface ChatMessage {
@@ -45,6 +45,7 @@ export type SendText = (chatJid: string, text: string, options?: SendOptions) =>
 export type SendAudio = (chatJid: string, audio: ToxAudio, options?: SendOptions) => Promise<void>
 export type SendSticker = (chatJid: string, sticker: ToxSticker, options?: SendOptions) => Promise<void>
 export type SendImage = (chatJid: string, image: ToxImage, options?: SendOptions) => Promise<void>
+export type SendVideo = (chatJid: string, video: ToxVideo, options?: SendOptions) => Promise<void>
 /** An empty `emoji` revokes the reaction the bot left on that message. */
 export type SendReaction = (chatJid: string, emoji: string, target: unknown) => Promise<void>
 /** Removes members (by the ids the API knows them under) from a group. Throws when it can't (e.g. the bot is not an admin). */
@@ -70,12 +71,13 @@ export const CENSORSHIP_FAILED_REPLY = '⚠️ No pude borrar el mensaje de algu
 
 interface Deps {
     config: Config
-    tox: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage'> &
+    tox: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage' | 'fetchVideo'> &
         Partial<Pick<ToxClient, 'fetchJob' | 'fetchHistoryChats' | 'saveHistory' | 'fetchCensored'>>
     sendText: SendText
     sendAudio: SendAudio
     sendSticker: SendSticker
     sendImage: SendImage
+    sendVideo: SendVideo
     sendReaction: SendReaction
     logger: HandlerLogger
     /** Optional: lets the API pick a random member. Failures are tolerated. */
@@ -142,7 +144,7 @@ function quotedOf(quoted: { text: string; senderJid?: string }, selfJids: Set<st
     }
 }
 
-export function createMessageHandler({ config, tox, sendText, sendAudio, sendSticker, sendImage, sendReaction, logger, getGroupMembers, getSelfJids, removeMembers, sweepBlacklist, deleteMessage, jobPollMs = 2_000, jobMaxWaitMs = 15 * 60_000, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }: Deps) {
+export function createMessageHandler({ config, tox, sendText, sendAudio, sendSticker, sendImage, sendVideo, sendReaction, logger, getGroupMembers, getSelfJids, removeMembers, sweepBlacklist, deleteMessage, jobPollMs = 2_000, jobMaxWaitMs = 15 * 60_000, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }: Deps) {
     const startsWithPrefix = (text: string) => config.commandPrefixes.some((prefix) => text.startsWith(prefix))
 
     /** The group's member list for the API, plus whether the sender administers this group. When the roster can't be
@@ -194,7 +196,7 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         for (const [index, reply] of replies.entries()) {
             // Only the first reply quotes the command, so multi-part answers stay readable.
             const quoteRef = index === 0 ? message.quoteRef : undefined
-            const hasMedia = Boolean(reply.audio) || Boolean(reply.sticker) || Boolean(reply.image)
+            const hasMedia = Boolean(reply.audio) || Boolean(reply.sticker) || Boolean(reply.image) || Boolean(reply.video)
             try {
                 if (reply.remove?.length) {
                     try {
@@ -220,6 +222,9 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
                 }
                 if (reply.image) {
                     await sendImage(message.chatJid, await tox.fetchImage(reply.image), { quoteRef })
+                }
+                if (reply.video) {
+                    await sendVideo(message.chatJid, await tox.fetchVideo(reply.video), { quoteRef })
                 }
                 if (reply.text) {
                     const { text: body, mentionJids } = renderMentions(reply)

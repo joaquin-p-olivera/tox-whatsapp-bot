@@ -13,7 +13,7 @@ import {
     type GroupMember,
     type SendOptions
 } from '../src/messageHandler.ts'
-import type { CensoredChat, ToxAudio, ToxHistoryMessage, ToxImage, ToxMessage, ToxReply, ToxSticker } from '../src/toxClient.ts'
+import type { CensoredChat, ToxAudio, ToxHistoryMessage, ToxImage, ToxMessage, ToxReply, ToxSticker, ToxVideo } from '../src/toxClient.ts'
 import { makeConfig, makeMessage, silentLogger } from './helpers.ts'
 
 const plain = (text: string): ToxReply => ({ text, mentions: [] })
@@ -26,6 +26,7 @@ interface SetupOptions {
     audioFails?: boolean
     stickerFails?: boolean
     imageFails?: boolean
+    videoFails?: boolean
     /** Chat ids the API says have history turned on (enables the history calls of the fake API). */
     history?: string[]
     /** Who the API says is censored, by chat (enables the censored call of the fake API). */
@@ -44,6 +45,8 @@ function setup(options: SetupOptions = {}) {
     const stickersFetched: string[] = []
     const stickersSent: { jid: string; sticker: ToxSticker; options: SendOptions | undefined }[] = []
     const imagesFetched: string[] = []
+    const videosFetched: string[] = []
+    const videosSent: { jid: string; video: ToxVideo; options: SendOptions | undefined }[] = []
     const imagesSent: { jid: string; image: ToxImage; options: SendOptions | undefined }[] = []
     const reactionsSent: { jid: string; emoji: string; target: unknown }[] = []
     const historySaved: ToxHistoryMessage[] = []
@@ -73,6 +76,11 @@ function setup(options: SetupOptions = {}) {
                 imagesFetched.push(id)
                 if (options.imageFails) throw new Error('image 404')
                 return { data: new Uint8Array([7, 8, 9]), mimetype: 'image/png' }
+            },
+            async fetchVideo(id) {
+                videosFetched.push(id)
+                if (options.videoFails) throw new Error('video 404')
+                return { data: new Uint8Array([1, 2, 3, 4]), mimetype: 'video/mp4' }
             },
             async fetchHistoryChats() {
                 return options.history ?? []
@@ -113,11 +121,14 @@ function setup(options: SetupOptions = {}) {
         async sendImage(jid, image, sendOptions) {
             imagesSent.push({ jid, image, options: sendOptions })
         },
+        async sendVideo(jid, video, sendOptions) {
+            videosSent.push({ jid, video, options: sendOptions })
+        },
         async sendReaction(jid, emoji, target) {
             reactionsSent.push({ jid, emoji, target })
         }
     })
-    return { handle, apiCalls, sent, audiosFetched, audiosSent, stickersFetched, stickersSent, imagesFetched, imagesSent, reactionsSent, historySaved, deleted, censoredReads: () => censoredReads }
+    return { handle, apiCalls, sent, audiosFetched, audiosSent, stickersFetched, stickersSent, imagesFetched, imagesSent, videosFetched, videosSent, reactionsSent, historySaved, deleted, censoredReads: () => censoredReads }
 }
 
 const member = (id: string, extra: Partial<GroupMember> = {}): GroupMember => ({ userId: id, aliases: [id], ...extra })
@@ -196,13 +207,15 @@ test('a tag of the bot itself is flagged as is_bot, whichever form of its JID wa
             sendMessage: async (m) => (calls.push(m), []),
             fetchAudio: async () => ({ data: new Uint8Array(), mimetype: 'audio/mp4' }),
             fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' }),
-            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' })
+            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' }),
+            fetchVideo: async () => ({ data: new Uint8Array(), mimetype: 'video/mp4' })
         },
         getSelfJids: () => ['999:3@lid', '598000@s.whatsapp.net'],
         sendText: async () => {},
         sendAudio: async () => {},
         sendSticker: async () => {},
         sendImage: async () => {},
+        sendVideo: async () => {},
         sendReaction: async () => {}
     })
     await handle(makeMessage({ text: '!gay @bot @Bob', mentionedJids: ['999@lid', '111@lid'] }))
@@ -374,7 +387,8 @@ test('a failing send does not throw', async () => {
             sendMessage: async () => [plain('a'), plain('b')],
             fetchAudio: async () => ({ data: new Uint8Array(), mimetype: 'audio/mp4' }),
             fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' }),
-            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' })
+            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' }),
+            fetchVideo: async () => ({ data: new Uint8Array(), mimetype: 'video/mp4' })
         },
         sendText: async () => {
             throw new Error('socket closed')
@@ -382,6 +396,7 @@ test('a failing send does not throw', async () => {
         sendAudio: async () => {},
         sendSticker: async () => {},
         sendImage: async () => {},
+        sendVideo: async () => {},
         sendReaction: async () => {}
     })
     await assert.doesNotReject(handle(makeMessage()))
@@ -463,13 +478,15 @@ test('warns when the group has nobody to mention besides the sender', async () =
             sendMessage: async () => [plain('ok')],
             fetchAudio: async () => ({ data: new Uint8Array(), mimetype: 'audio/mp4' }),
             fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' }),
-            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' })
+            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' }),
+            fetchVideo: async () => ({ data: new Uint8Array(), mimetype: 'video/mp4' })
         },
         getGroupMembers: async () => [member('198765432100@lid')], // only the sender (the bot is already excluded)
         sendText: async () => {},
         sendAudio: async () => {},
         sendSticker: async () => {},
         sendImage: async () => {},
+        sendVideo: async () => {},
         sendReaction: async () => {}
     })
     await handle(makeMessage({ text: '!m' }))
@@ -508,12 +525,14 @@ test('if the audio cannot be downloaded, it logs and sends nothing (no crash, no
                 throw new Error('404')
             },
             fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' }),
-            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' })
+            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' }),
+            fetchVideo: async () => ({ data: new Uint8Array(), mimetype: 'video/mp4' })
         },
         sendText: async () => assert.fail('nothing should be sent'),
         sendAudio: async () => assert.fail('nothing should be sent'),
         sendSticker: async () => assert.fail('nothing should be sent'),
         sendImage: async () => assert.fail('nothing should be sent'),
+        sendVideo: async () => assert.fail('nothing should be sent'),
         sendReaction: async () => assert.fail('nothing should be sent')
     })
     await assert.doesNotReject(handle(makeMessage({ text: '!m' })))
@@ -563,6 +582,25 @@ test('an image reply downloads it and sends it, quoting the command', async () =
     assert.equal(sent.length, 0, 'no text is sent along with a pure image reply')
 })
 
+test('a video reply downloads it and sends it, quoting the command', async () => {
+    const { handle, sent, videosFetched, videosSent } = setup({ replies: [{ text: '', mentions: [], video: 'yt123' }] })
+    const message = makeMessage({ text: '!yt https://youtu.be/dQw4w9WgXcQ' })
+    await handle(message)
+
+    assert.deepEqual(videosFetched, ['yt123'])
+    assert.equal(videosSent.length, 1)
+    assert.deepEqual([...(videosSent[0]?.video.data ?? [])], [1, 2, 3, 4])
+    assert.equal(videosSent[0]?.video.mimetype, 'video/mp4')
+    assert.equal(videosSent[0]?.options?.quoteRef, message.quoteRef)
+    assert.equal(sent.length, 0, 'no text is sent along with a pure video reply')
+})
+
+test('if the video cannot be downloaded, it sends nothing (no crash, no broken message)', async () => {
+    const { handle, videosSent, sent } = setup({ replies: [{ text: '', mentions: [], video: 'yt123' }], videoFails: true })
+    await handle(makeMessage({ text: '!yt https://youtu.be/dQw4w9WgXcQ' }))
+    assert.equal(videosSent.length + sent.length, 0)
+})
+
 test('a text reply never touches the image endpoint', async () => {
     const { handle, imagesFetched, imagesSent } = setup()
     await handle(makeMessage())
@@ -580,12 +618,14 @@ test('if the image cannot be downloaded, it logs and sends nothing (no crash, no
             fetchSticker: async () => ({ data: new Uint8Array(), mimetype: 'image/webp' }),
             fetchImage: async () => {
                 throw new Error('404')
-            }
+            },
+            fetchVideo: async () => ({ data: new Uint8Array(), mimetype: 'video/mp4' })
         },
         sendText: async () => assert.fail('nothing should be sent'),
         sendAudio: async () => assert.fail('nothing should be sent'),
         sendSticker: async () => assert.fail('nothing should be sent'),
         sendImage: async () => assert.fail('nothing should be sent'),
+        sendVideo: async () => assert.fail('nothing should be sent'),
         sendReaction: async () => assert.fail('nothing should be sent')
     })
     await assert.doesNotReject(handle(makeMessage({ text: '!futbol argentina -t' })))
@@ -604,12 +644,14 @@ test('if the sticker cannot be downloaded, it logs and sends nothing (no crash, 
             fetchSticker: async () => {
                 throw new Error('404')
             },
-            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' })
+            fetchImage: async () => ({ data: new Uint8Array(), mimetype: 'image/png' }),
+            fetchVideo: async () => ({ data: new Uint8Array(), mimetype: 'video/mp4' })
         },
         sendText: async () => assert.fail('nothing should be sent'),
         sendAudio: async () => assert.fail('nothing should be sent'),
         sendSticker: async () => assert.fail('nothing should be sent'),
         sendImage: async () => assert.fail('nothing should be sent'),
+        sendVideo: async () => assert.fail('nothing should be sent'),
         sendReaction: async () => assert.fail('nothing should be sent')
     })
     await assert.doesNotReject(handle(makeMessage({ text: '!sticker hola' })))
@@ -637,12 +679,14 @@ test('a ban reply with a working removal sends the announcement and asks for the
             },
             async fetchAudio() { throw new Error('unused') },
             async fetchSticker() { throw new Error('unused') },
-            async fetchImage() { throw new Error('unused') }
+            async fetchImage() { throw new Error('unused') },
+            async fetchVideo() { throw new Error('unused') }
         },
         async sendText(_jid, text) { calls.push(`text:${text}`) },
         async sendAudio() {},
         async sendSticker() {},
         async sendImage() {},
+        async sendVideo() {},
         async sendReaction() {},
         async removeMembers(_jid, ids) { calls.push(`remove:${ids.join(',')}`) },
         async sweepBlacklist() { calls.push('sweep') }
@@ -678,12 +722,14 @@ function jobHandler(fetchJob: (id: string) => Promise<{ status: 'running' | 'don
             async fetchAudio() { throw new Error('unused') },
             async fetchSticker() { throw new Error('unused') },
             async fetchImage() { throw new Error('unused') },
+            async fetchVideo() { throw new Error('unused') },
             fetchJob
         },
         async sendText(_jid, text, options) { sent.push({ text, quoted: options?.quoteRef }) },
         async sendAudio() {},
         async sendSticker() {},
         async sendImage() {},
+        async sendVideo() {},
         async sendReaction(_jid, emoji) { reactions.push(emoji) },
         jobPollMs: 1,
         jobMaxWaitMs: 5_000,

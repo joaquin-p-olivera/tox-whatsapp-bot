@@ -16,7 +16,7 @@ export interface BotOptions {
     clientOptions?: Partial<WaClientOptions>
     /** Replaces the persistent SQLite store (tests use an in-memory one). */
     store?: WaStore
-    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage' | 'fetchPendingAlerts' | 'fetchBlacklist' | 'fetchJob' | 'fetchHistoryChats' | 'saveHistory' | 'fetchCensored'>
+    tox?: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage' | 'fetchVideo' | 'fetchPendingAlerts' | 'fetchBlacklist' | 'fetchJob' | 'fetchHistoryChats' | 'saveHistory' | 'fetchCensored'>
 }
 
 export interface Bot {
@@ -227,6 +227,13 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
             await client.message.send(
                 chatJid,
                 { type: 'image', media: data, mimetype },
+                quoteRef ? { quote: quoteRef as WaIncomingMessageEvent } : undefined
+            )
+        },
+        sendVideo: async (chatJid, { data, mimetype }, { quoteRef } = {}) => {
+            await client.message.send(
+                chatJid,
+                { type: 'video', media: data, mimetype },
                 quoteRef ? { quote: quoteRef as WaIncomingMessageEvent } : undefined
             )
         },
