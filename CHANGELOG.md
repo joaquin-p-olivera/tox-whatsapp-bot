@@ -7,6 +7,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] - 27 Oct 2026
+
 ### Added
 
 - A proactive alert may now carry an image (`image` on `GET /api/v1/alerts/pending`), which is what the API's GTA VI countdown card rides on. The bot downloads it and sends the picture; if it cannot fetch it or WhatsApp refuses it, it sends the row's text instead, so an alert is never lost to a picture.

@@ -1,6 +1,6 @@
 {
   "name": "tox-whatsapp-bot",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "WhatsApp front-end for the Tox API: forwards chat messages and sends back the replies.",
   "private": true,
   "type": "module",
