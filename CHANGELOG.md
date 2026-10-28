@@ -7,6 +7,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `!yt` sent its title line and no video: `normalizeReply` rebuilds a reply field by field, and `video` was never added to it, so the id was dropped before the delivery ever saw it and the bot never asked the API for the file. Nothing failed and nothing was logged, which is why it looked like the video had been sent. The tests that cover the sending stub the API out and never went through `normalizeReply`; the ones added here do, for `sendMessage` and for a job's replies, which is how `!yt` answers.
+
 ## [1.0.0] - 27 Oct 2026
 
 ### Added

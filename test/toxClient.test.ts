@@ -85,6 +85,30 @@ test('a reply with a sticker keeps its id', async () => {
     assert.deepEqual(await client.sendMessage(message), [{ text: '', mentions: [], sticker: 'abc123' }])
 })
 
+test('a reply with a video keeps its id', async () => {
+    const client = new ToxClient('http://api', 'k', 1000, async () => jsonResponse({ replies: [{ text: '', mentions: [], video: 'yt123' }] }))
+    assert.deepEqual(await client.sendMessage(message), [{ text: '', mentions: [], video: 'yt123' }])
+})
+
+test('a job reply with a video keeps its id (what !yt answers with)', async () => {
+    const client = new ToxClient('http://api', 'k', 1000, async () =>
+        jsonResponse({ status: 'done', replies: [{ text: '', mentions: [], video: 'yt123' }] }))
+    assert.deepEqual(await client.fetchJob('j1'), { status: 'done', replies: [{ text: '', mentions: [], video: 'yt123' }] })
+})
+
+test('fetchVideo downloads the bytes with the API key and returns the mimetype', async () => {
+    let seen: { url: string; init: RequestInit } | undefined
+    const client = new ToxClient('http://api', 'secret', 1000, async (url, init) => {
+        seen = { url: String(url), init: init as RequestInit }
+        return new Response(new Uint8Array([1, 2, 3, 4]), { status: 200, headers: { 'content-type': 'video/mp4' } })
+    })
+    const video = await client.fetchVideo('yt 123')
+    assert.deepEqual([...video.data], [1, 2, 3, 4])
+    assert.equal(video.mimetype, 'video/mp4')
+    assert.equal(seen?.url, 'http://api/api/v1/videos/yt%20123', 'the id is URL-encoded')
+    assert.equal((seen?.init.headers as Record<string, string>)['x-api-key'], 'secret')
+})
+
 test('fetchSticker downloads the bytes with the API key and returns the mimetype', async () => {
     let seen: { url: string; init: RequestInit } | undefined
     const client = new ToxClient('http://api', 'secret', 1000, async (url, init) => {

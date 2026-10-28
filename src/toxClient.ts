@@ -126,6 +126,7 @@ function normalizeReply(reply: ToxReply): ToxReply {
         ...(reply.audio ? { audio: reply.audio } : {}),
         ...(reply.sticker ? { sticker: reply.sticker } : {}),
         ...(reply.image ? { image: reply.image } : {}),
+        ...(reply.video ? { video: reply.video } : {}),
         // An empty reaction is kept on purpose: it means "take off the reaction you put there" (see sendReaction).
         ...(reply.reaction != null ? { reaction: reply.reaction } : {}),
         ...(reply.job ? { job: reply.job } : {}),
