@@ -60,6 +60,12 @@ before(async () => {
             res.end('[]')
             return
         }
+        // GET /api/v1/afk: nobody is away (the bot asks before dropping the chatter of a chat it cannot read)
+        if (req.method === 'GET' && req.url?.startsWith('/api/v1/afk')) {
+            res.setHeader('content-type', 'application/json')
+            res.end('{"user_ids":[]}')
+            return
+        }
         // GET /api/v1/stickers/<id>: serve a fake webp
         if (req.method === 'GET' && req.url?.startsWith('/api/v1/stickers/')) {
             stickerRequests.push({ url: req.url, apiKey: req.headers['x-api-key'] as string | undefined })

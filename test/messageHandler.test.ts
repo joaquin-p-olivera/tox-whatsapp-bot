@@ -33,6 +33,8 @@ interface SetupOptions {
     censored?: CensoredChat[]
     /** The censored list cannot be read. */
     censoredFails?: boolean
+    /** The ids the API says are away (!afk), which enables the away call of the fake API. */
+    away?: string[]
     /** Deleting a message is refused, as WhatsApp does when the bot is not an admin. */
     deleteFails?: boolean
 }
@@ -52,6 +54,7 @@ function setup(options: SetupOptions = {}) {
     const historySaved: ToxHistoryMessage[] = []
     const deleted: { jid: string; target: unknown }[] = []
     let censoredReads = 0
+    let awayReads = 0
     const { members } = options
     const handle = createMessageHandler({
         config: makeConfig(options.config),
@@ -96,6 +99,14 @@ function setup(options: SetupOptions = {}) {
                           return options.censored ?? []
                       }
                   }
+                : {}),
+            ...(options.away
+                ? {
+                      async fetchAfk() {
+                          awayReads += 1
+                          return options.away ?? []
+                      }
+                  }
                 : {})
         },
         async deleteMessage(jid, target) {
@@ -128,7 +139,7 @@ function setup(options: SetupOptions = {}) {
             reactionsSent.push({ jid, emoji, target })
         }
     })
-    return { handle, apiCalls, sent, audiosFetched, audiosSent, stickersFetched, stickersSent, imagesFetched, imagesSent, videosFetched, videosSent, reactionsSent, historySaved, deleted, censoredReads: () => censoredReads }
+    return { handle, apiCalls, sent, audiosFetched, audiosSent, stickersFetched, stickersSent, imagesFetched, imagesSent, videosFetched, videosSent, reactionsSent, historySaved, deleted, censoredReads: () => censoredReads, awayReads: () => awayReads }
 }
 
 const member = (id: string, extra: Partial<GroupMember> = {}): GroupMember => ({ userId: id, aliases: [id], ...extra })
@@ -969,4 +980,57 @@ test('reads the censored list again right after a command, and caches it otherwi
     const cached = censoredReads()
     await handle(makeMessage({ text: 'y otra cosa' }))
     assert.equal(censoredReads(), cached)
+})
+
+
+const AWAY = '198765432100@lid'  // the id makeMessage's sender writes from, device stripped
+
+test('chatter of a group with history off is forwarded when it is the away list\'s business', async () => {
+    const off = '120363000000000002@g.us'  // history is on nowhere
+    const { handle, apiCalls } = setup({ away: [AWAY] })
+
+    // Somebody away writes: the API has to hear it, or they would never come back
+    await handle(makeMessage({ text: 'ya volví', chatJid: off }))
+    // Somebody else tags them, or replies to them: the API answers for them
+    await handle(makeMessage({ text: 'dale {@0}', chatJid: off, senderJid: '111@lid', mentionedJids: [AWAY] }))
+    await handle(makeMessage({ text: 'qué decís', chatJid: off, senderJid: '111@lid',
+        quoted: { text: 'lo de ayer', senderJid: `${AWAY.split('@')[0]}:7@lid` } }))
+
+    assert.deepEqual(apiCalls.map((call) => call.text), ['ya volví', 'dale {@0}', 'qué decís'])
+})
+
+test('chatter of a group with history off is still dropped when nobody away is in it', async () => {
+    const { handle, apiCalls } = setup({ away: [AWAY] })
+    await handle(makeMessage({ text: 'hola a todos', chatJid: '120363000000000002@g.us', senderJid: '111@lid' }))
+    assert.deepEqual(apiCalls, [], 'the API is not told what a chat it cannot read is talking about')
+})
+
+test('with nobody away, a chat with history off is not forwarded at all', async () => {
+    const { handle, apiCalls } = setup({ away: [] })
+    await handle(makeMessage({ text: 'hola', chatJid: '120363000000000002@g.us' }))
+    assert.deepEqual(apiCalls, [])
+})
+
+test('the personal mode never reads the away list', async () => {
+    const { handle, awayReads } = setup({ ...PERSONAL, away: [AWAY] })
+    await handle(own('hola'))
+    await handle(own('.b ping'))
+    assert.equal(awayReads(), 0, 'afk is the group bot\'s business: the personal one answers for nobody')
+})
+
+test('reads the away list again right after a message it forwarded, and caches it otherwise', async () => {
+    const off = '120363000000000002@g.us'  // history off: without the away list nothing here would be forwarded
+    const present = '111@lid'  // not away, so nothing of theirs is forwarded and nothing invalidates the list
+    const { handle, awayReads } = setup({ away: [AWAY] })
+
+    await handle(makeMessage({ text: 'hola', chatJid: off, senderJid: present }))
+    const first = awayReads()
+    await handle(makeMessage({ text: 'y otra cosa', chatJid: off, senderJid: present }))
+    assert.equal(awayReads(), first, 'two plain messages in a row do not read it twice')
+
+    // Anything that did reach the API may have changed the list (!afk, or somebody away writing), so the next
+    // message reads it again instead of waiting for it to go stale.
+    await handle(makeMessage({ text: '!afk comiendo', chatJid: off, senderJid: present }))
+    await handle(makeMessage({ text: 'sigo acá', chatJid: off, senderJid: present }))
+    assert.equal(awayReads(), first + 1)
 })

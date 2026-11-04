@@ -72,7 +72,7 @@ export const CENSORSHIP_FAILED_REPLY = '⚠️ No pude borrar el mensaje de algu
 interface Deps {
     config: Config
     tox: Pick<ToxClient, 'sendMessage' | 'fetchAudio' | 'fetchSticker' | 'fetchImage' | 'fetchVideo'> &
-        Partial<Pick<ToxClient, 'fetchJob' | 'fetchHistoryChats' | 'saveHistory' | 'fetchCensored'>>
+        Partial<Pick<ToxClient, 'fetchJob' | 'fetchHistoryChats' | 'saveHistory' | 'fetchCensored' | 'fetchAfk'>>
     sendText: SendText
     sendAudio: SendAudio
     sendSticker: SendSticker
@@ -301,6 +301,35 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         return [message.chatJid, message.chatAltJid].some((id) => !!id && historyChats.has(id))
     }
 
+    // --- Away: who said they are afk. Groups mode only, like everything else the API answers for somebody. ---
+    // A chat with the history off forwards commands and nothing else, so without this list the away person could
+    // never be told about there, nor noticed coming back. Polled like the two lists below it, and only used to
+    // decide what is worth forwarding: what is said about it is still the API's answer, not the bot's.
+    const AFK_REFRESH_MS = 15_000
+    let awayIds = new Set<string>()
+    let awayFetchedAt = 0
+
+    async function refreshAway(): Promise<void> {
+        if (!tox.fetchAfk || Date.now() - awayFetchedAt <= AFK_REFRESH_MS) return
+        try {
+            awayIds = new Set(await tox.fetchAfk())
+            awayFetchedAt = Date.now()
+        } catch (error) {
+            // The last list stays in force, the same as the censored one: an API that blinks must not make
+            // everybody present again.
+            logger.warn('Could not read who is away; keeping the last list', { error: String(error) })
+        }
+    }
+
+    /** Whether this message is the away list's business: whoever wrote it is away (and is therefore back), or
+     * somebody away was tagged or replied to. */
+    function concernsSomebodyAway(message: ChatMessage): boolean {
+        if (awayIds.size === 0) return false
+        const people = [message.senderJid, message.senderAltJid, message.quoted?.senderJid,
+                        ...(message.mentionedJids ?? [])]
+        return people.some((jid) => !!jid && awayIds.has(stripDevice(jid)))
+    }
+
     // --- Censorship: whose messages are deleted on sight (!censura). Groups mode only. ---
     // Polled like the history list, and for the same reason: a censored person's ordinary chatter never reaches the
     // API unless that chat has history on, so the deletion cannot be the API's answer to a forwarded message.
@@ -428,7 +457,11 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             if (chatter) {
                 if (!message.isGroup) return
                 await refreshHistoryChats()
-                if (!historyIsOn(message)) return
+                if (!historyIsOn(message)) {
+                    // The API cannot read this chat, but it still answers for whoever is away in it.
+                    await refreshAway()
+                    if (!concernsSomebodyAway(message)) return
+                }
             }
 
             if (message.isGroup) {
@@ -494,6 +527,7 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         // again with the next message instead of waiting for them to go stale.
         historyFetchedAt = 0
         censoredFetchedAt = 0
+        awayFetchedAt = 0  // and `!afk` has just put somebody on the away list, or taken them off it
         if (!(await deliver(message, replies))) return
         // A long-running command (!claude) answered with just a reaction: the real answer is picked up when it is ready,
         // without holding this handler (other commands keep working meanwhile).

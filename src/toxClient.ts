@@ -240,6 +240,12 @@ export class ToxClient {
         return (await response.json()) as CensoredChat[]
     }
 
+    /** Who is away right now (!afk): the ids whose ordinary messages are worth forwarding even with history off. */
+    async fetchAfk(): Promise<string[]> {
+        const response = await this.get('/api/v1/afk?platform=whatsapp', 'away users')
+        return ((await response.json()) as { user_ids: string[] }).user_ids
+    }
+
     /** The chat ids (aliases included) that have history turned on: only their messages are worth forwarding. */
     async fetchHistoryChats(): Promise<string[]> {
         const response = await this.get('/api/v1/history/chats?platform=whatsapp', 'history chats')
