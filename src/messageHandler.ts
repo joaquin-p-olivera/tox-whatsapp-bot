@@ -121,6 +121,14 @@ export function renderMentions(reply: ToxReply): { text: string; mentionJids: st
 /** What starts a command in the personal mode: ".b sticker hola" (the API parses it, this is only the cheap filter). */
 export const PERSONAL_PREFIX = '.b '
 
+/** A message that is nothing but a greeting, which the API answers in any group with a fixed line (its
+ * `command_router.GREETING`). The pattern is a copy of that one on purpose: it is the only way a greeting can be
+ * forwarded from a group whose history is off, where ordinary chatter stops here. Keep the two in step. */
+const GREETING = /^h+o+l+(a+|i+)s?$/
+export function isGreeting(text: string): boolean {
+    return GREETING.test(text.trim().replace(/^[\s!¡?¿.,;:]+|[\s!¡?¿.,;:]+$/g, '').toLowerCase())
+}
+
 /** The chats of a person (not a group, a broadcast list, a status or a channel). */
 function isPrivateChat(chatJid: string): boolean {
     return chatJid.endsWith('@s.whatsapp.net') || chatJid.endsWith('@lid')
@@ -449,18 +457,22 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
         } else {
             if (message.fromMe) return
             // Cheap local filter: a command, or a reply to the bot (a question for Claude, prefix or not), always goes
-            // to the API. So does ordinary chatter of a group whose history is on, which is the only thing the API can
-            // read: now and then it butts in with a remark of its own (CLAUDE_INTERJECT_CHANCE), and otherwise says
-            // nothing. Anything else stops here.
+            // to the API. So does a bare greeting in a group, which the API answers on its own, and ordinary chatter of
+            // a group whose history is on, which is the only thing the API can read: now and then it butts in with a
+            // remark of its own (CLAUDE_INTERJECT_CHANCE), and otherwise says nothing. Anything else stops here.
             if (!text) return
             chatter = !startsWithPrefix(text) && !repliesToBot(message, selfJids)
             if (chatter) {
                 if (!message.isGroup) return
-                await refreshHistoryChats()
-                if (!historyIsOn(message)) {
-                    // The API cannot read this chat, but it still answers for whoever is away in it.
-                    await refreshAway()
-                    if (!concernsSomebodyAway(message)) return
+                // A greeting is the exception, and it needs no list: the API answers one in every group, with no
+                // conversation to read -- which is the only reason the rest of the chatter is held back here.
+                if (!isGreeting(text)) {
+                    await refreshHistoryChats()
+                    if (!historyIsOn(message)) {
+                        // The API cannot read this chat, but it still answers for whoever is away in it.
+                        await refreshAway()
+                        if (!concernsSomebodyAway(message)) return
+                    }
                 }
             }
 
