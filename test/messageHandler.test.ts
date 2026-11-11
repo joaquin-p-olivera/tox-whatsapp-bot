@@ -286,6 +286,17 @@ test('ordinary chatter is forwarded only from a group whose history is on, and i
     assert.equal(downloaded, 0, 'nobody asked for anything: downloading every photo of the group would be waste')
 })
 
+test('a bare greeting is forwarded from any group, history or no history, but never from a private chat', async () => {
+    const { handle, apiCalls } = setup({ history: ['120363000000000001@g.us'] })
+    const off = '120363000000000002@g.us'
+    await handle(makeMessage({ text: 'Hola!', chatJid: off }))
+    await handle(makeMessage({ text: 'holis', chatJid: off }))
+    await handle(makeMessage({ text: 'hola a todos', chatJid: off })) // not a greeting on its own: stops here
+    await handle(makeMessage({ text: 'hola', isGroup: false, chatJid: '59899111111@s.whatsapp.net' }))
+
+    assert.deepEqual(apiCalls.map((call) => call.text), ['Hola!', 'holis'])
+})
+
 test('a command still carries its picture, chatter or not', async () => {
     const { handle, apiCalls } = setup({ history: ['120363000000000001@g.us'] })
     await handle(makeMessage({ text: '!sticker', getImage: async () => new Uint8Array([1, 2, 3]) }))
@@ -974,7 +985,7 @@ test('reads the censored list again right after a command, and caches it otherwi
     // A command may have just censored somebody (!censura), so the list is read again with the next message
     await handle(makeMessage({ text: '!ping' }))
     const afterCommand = censoredReads()
-    await handle(makeMessage({ text: 'hola' }))
+    await handle(makeMessage({ text: 'ahí andamos' }))
     assert.equal(censoredReads(), afterCommand + 1)
     // ...but two plain messages in a row, with no command in between, do not read it twice
     const cached = censoredReads()
@@ -1007,7 +1018,7 @@ test('chatter of a group with history off is still dropped when nobody away is i
 
 test('with nobody away, a chat with history off is not forwarded at all', async () => {
     const { handle, apiCalls } = setup({ away: [] })
-    await handle(makeMessage({ text: 'hola', chatJid: '120363000000000002@g.us' }))
+    await handle(makeMessage({ text: 'ahí andamos', chatJid: '120363000000000002@g.us' }))
     assert.deepEqual(apiCalls, [])
 })
 
@@ -1023,7 +1034,7 @@ test('reads the away list again right after a message it forwarded, and caches i
     const present = '111@lid'  // not away, so nothing of theirs is forwarded and nothing invalidates the list
     const { handle, awayReads } = setup({ away: [AWAY] })
 
-    await handle(makeMessage({ text: 'hola', chatJid: off, senderJid: present }))
+    await handle(makeMessage({ text: 'ahí andamos', chatJid: off, senderJid: present }))
     const first = awayReads()
     await handle(makeMessage({ text: 'y otra cosa', chatJid: off, senderJid: present }))
     assert.equal(awayReads(), first, 'two plain messages in a row do not read it twice')
