@@ -152,6 +152,12 @@ function repliesToBot(message: ChatMessage, selfJids: Set<string>): boolean {
     return Boolean(author && selfJids.has(stripDevice(author)))
 }
 
+/** Whether the message tags the bot with an @, which is talking to it just like replying to it is: the API reads the
+ * tag and asks Claude (see its `addressed_to_the_bot`). */
+function tagsBot(message: ChatMessage, selfJids: Set<string>): boolean {
+    return (message.mentionedJids ?? []).some((jid) => selfJids.has(stripDevice(jid)))
+}
+
 /** The replied-to message for the API. In the personal mode the own account is the owner, not the bot. */
 function quotedOf(quoted: { text: string; senderJid?: string }, selfJids: Set<string>, personal: boolean): ToxQuoted {
     const id = quoted.senderJid ? stripDevice(quoted.senderJid) : undefined
@@ -467,12 +473,12 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             } else if (!isPrivateChat(message.chatJid)) return
         } else {
             if (message.fromMe) return
-            // Cheap local filter: a command, or a reply to the bot (a question for Claude, prefix or not), always goes
-            // to the API. So does ordinary chatter of a group whose history is on, which is the only thing the API can
+            // Cheap local filter: a command, a reply to the bot or a tag of it (a question for Claude, prefix or not),
+            // always goes to the API. So does ordinary chatter of a group whose history is on, which is the only thing the API can
             // read: now and then it butts in with a remark of its own (CLAUDE_INTERJECT_CHANCE), and otherwise says
             // nothing. Anything else stops here.
             if (!text) return
-            chatter = !startsWithPrefix(text) && !repliesToBot(message, selfJids)
+            chatter = !startsWithPrefix(text) && !repliesToBot(message, selfJids) && !tagsBot(message, selfJids)
             if (chatter) {
                 if (!message.isGroup) return
                 await refreshHistoryChats()

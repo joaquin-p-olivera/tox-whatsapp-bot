@@ -1005,6 +1005,15 @@ test('chatter of a group with history off is still dropped when nobody away is i
     assert.deepEqual(apiCalls, [], 'the API is not told what a chat it cannot read is talking about')
 })
 
+test('a tag of the bot is forwarded from any group, like a reply to it', async () => {
+    const { handle, apiCalls } = setup({ history: ['120363000000000001@g.us'] })
+    const off = '120363000000000002@g.us'
+    await handle(makeMessage({ text: '@999 qué opinás?', chatJid: off, mentionedJids: ['999@lid'] }))
+    await handle(makeMessage({ text: '@59899111111 y vos?', chatJid: off, mentionedJids: ['59899111111@s.whatsapp.net'] }))
+
+    assert.deepEqual(apiCalls.map((call) => call.text), ['@999 qué opinás?'])
+})
+
 test('with nobody away, a chat with history off is not forwarded at all', async () => {
     const { handle, apiCalls } = setup({ away: [] })
     await handle(makeMessage({ text: 'hola', chatJid: '120363000000000002@g.us' }))
