@@ -51,11 +51,12 @@ function clip(text: string): string {
     return flat.length > ABOUT_MAX_CHARS ? `${flat.slice(0, ABOUT_MAX_CHARS - 1)}…` : flat
 }
 
-/** The media of a reply, described by what asked for it and the text that went with it: all a later reply to that
- * picture or voice note will have to go on, since neither carries text of its own. */
-export function describeMedia(kind: string, command: string, reply: Pick<ToxReply, 'text'>): string {
+/** The media of a reply, described by what the API says it is, what asked for it and the text that went with it:
+ * all a later reply to that picture or voice note will have to go on, since neither carries text of its own. */
+export function describeMedia(kind: string, command: string, reply: Pick<ToxReply, 'text' | 'about'>): string {
+    const what = reply.about ? `: "${clip(reply.about)}"` : ''
     const said = reply.text ? `, con el texto "${clip(reply.text)}"` : ''
-    return `${kind}, en respuesta a "${clip(command)}"${said}`
+    return `${kind}${what}, en respuesta a "${clip(command)}"${said}`
 }
 
 export type SendText = (chatJid: string, text: string, options?: SendOptions) => Promise<void>
