@@ -39,6 +39,24 @@ export interface GroupMember {
 export interface SendOptions {
     quoteRef?: unknown
     mentionJids?: string[]
+    /** What a picture, voice note, sticker or video was sent for, remembered so a reply to it can say so (sentMedia.ts) */
+    about?: string
+}
+
+/** How long a command or a text is let run inside the description of the media it went with. */
+const ABOUT_MAX_CHARS = 200
+
+function clip(text: string): string {
+    const flat = text.replace(/\s+/g, ' ').trim()
+    return flat.length > ABOUT_MAX_CHARS ? `${flat.slice(0, ABOUT_MAX_CHARS - 1)}…` : flat
+}
+
+/** The media of a reply, described by what the API says it is, what asked for it and the text that went with it:
+ * all a later reply to that picture or voice note will have to go on, since neither carries text of its own. */
+export function describeMedia(kind: string, command: string, reply: Pick<ToxReply, 'text' | 'about'>): string {
+    const what = reply.about ? `: "${clip(reply.about)}"` : ''
+    const said = reply.text ? `, con el texto "${clip(reply.text)}"` : ''
+    return `${kind}${what}, en respuesta a "${clip(command)}"${said}`
 }
 
 export type SendText = (chatJid: string, text: string, options?: SendOptions) => Promise<void>
@@ -142,6 +160,12 @@ function repliesToBot(message: ChatMessage, selfJids: Set<string>): boolean {
     return Boolean(author && selfJids.has(stripDevice(author)))
 }
 
+/** Whether the message tags the bot with an @, which is talking to it just like replying to it is: the API reads the
+ * tag and asks Claude (see its `addressed_to_the_bot`). */
+function tagsBot(message: ChatMessage, selfJids: Set<string>): boolean {
+    return (message.mentionedJids ?? []).some((jid) => selfJids.has(stripDevice(jid)))
+}
+
 /** The replied-to message for the API. In the personal mode the own account is the owner, not the bot. */
 function quotedOf(quoted: { text: string; senderJid?: string }, selfJids: Set<string>, personal: boolean): ToxQuoted {
     const id = quoted.senderJid ? stripDevice(quoted.senderJid) : undefined
@@ -222,17 +246,18 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
                     // emoji takes the reaction off again (that is how !claude clears its ⏳ once the answer is sent).
                     await sendReaction(message.chatJid, reply.reaction, message.quoteRef)
                 }
+                const about = (kind: string) => describeMedia(kind, message.text, reply)
                 if (reply.audio) {
-                    await sendAudio(message.chatJid, await tox.fetchAudio(reply.audio), { quoteRef })
+                    await sendAudio(message.chatJid, await tox.fetchAudio(reply.audio), { quoteRef, about: about('audio') })
                 }
                 if (reply.sticker) {
-                    await sendSticker(message.chatJid, await tox.fetchSticker(reply.sticker), { quoteRef })
+                    await sendSticker(message.chatJid, await tox.fetchSticker(reply.sticker), { quoteRef, about: about('sticker') })
                 }
                 if (reply.image) {
-                    await sendImage(message.chatJid, await tox.fetchImage(reply.image), { quoteRef })
+                    await sendImage(message.chatJid, await tox.fetchImage(reply.image), { quoteRef, about: about('imagen') })
                 }
                 if (reply.video) {
-                    await sendVideo(message.chatJid, await tox.fetchVideo(reply.video), { quoteRef })
+                    await sendVideo(message.chatJid, await tox.fetchVideo(reply.video), { quoteRef, about: about('video') })
                 }
                 if (reply.text) {
                     const { text: body, mentionJids } = renderMentions(reply)
@@ -456,12 +481,13 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
             } else if (!isPrivateChat(message.chatJid)) return
         } else {
             if (message.fromMe) return
-            // Cheap local filter: a command, or a reply to the bot (a question for Claude, prefix or not), always goes
-            // to the API. So does a bare greeting in a group, which the API answers on its own, and ordinary chatter of
-            // a group whose history is on, which is the only thing the API can read: now and then it butts in with a
-            // remark of its own (CLAUDE_INTERJECT_CHANCE), and otherwise says nothing. Anything else stops here.
+            // Cheap local filter: a command, a reply to the bot or a tag of it (a question for Claude, prefix or not),
+            // always goes to the API. So does a bare greeting in a group, which the API answers on its own, and ordinary
+            // chatter of a group whose history is on, which is the only thing the API can read: now and then it butts
+            // in with a remark of its own (CLAUDE_INTERJECT_CHANCE), and otherwise says nothing. Anything else stops
+            // here.
             if (!text) return
-            chatter = !startsWithPrefix(text) && !repliesToBot(message, selfJids)
+            chatter = !startsWithPrefix(text) && !repliesToBot(message, selfJids) && !tagsBot(message, selfJids)
             if (chatter) {
                 if (!message.isGroup) return
                 // A greeting is the exception, and it needs no list: the API answers one in every group, with no

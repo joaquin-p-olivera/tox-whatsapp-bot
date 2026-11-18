@@ -55,6 +55,8 @@ export interface ToxReply {
     image?: string
     /** Id of a video to send (download it with `fetchVideo`), e.g. !yt's. Short-lived: fetch it right away. */
     video?: string
+    /** What the media is, in words: what a reply to it gets as the quoted text (sentMedia.ts). */
+    about?: string
     /** An emoji to react to the command message with (nothing else is sent), e.g. for !uid. */
     reaction?: string
     /** User ids to remove from the chat the command ran in (!ban). The bot must be a group admin there. */
@@ -127,6 +129,7 @@ function normalizeReply(reply: ToxReply): ToxReply {
         ...(reply.sticker ? { sticker: reply.sticker } : {}),
         ...(reply.image ? { image: reply.image } : {}),
         ...(reply.video ? { video: reply.video } : {}),
+        ...(reply.about ? { about: reply.about } : {}),
         // An empty reaction is kept on purpose: it means "take off the reaction you put there" (see sendReaction).
         ...(reply.reaction != null ? { reaction: reply.reaction } : {}),
         ...(reply.job ? { job: reply.job } : {}),
