@@ -39,6 +39,23 @@ export interface GroupMember {
 export interface SendOptions {
     quoteRef?: unknown
     mentionJids?: string[]
+    /** What a picture, voice note, sticker or video was sent for, remembered so a reply to it can say so (sentMedia.ts) */
+    about?: string
+}
+
+/** How long a command or a text is let run inside the description of the media it went with. */
+const ABOUT_MAX_CHARS = 200
+
+function clip(text: string): string {
+    const flat = text.replace(/\s+/g, ' ').trim()
+    return flat.length > ABOUT_MAX_CHARS ? `${flat.slice(0, ABOUT_MAX_CHARS - 1)}…` : flat
+}
+
+/** The media of a reply, described by what asked for it and the text that went with it: all a later reply to that
+ * picture or voice note will have to go on, since neither carries text of its own. */
+export function describeMedia(kind: string, command: string, reply: Pick<ToxReply, 'text'>): string {
+    const said = reply.text ? `, con el texto "${clip(reply.text)}"` : ''
+    return `${kind}, en respuesta a "${clip(command)}"${said}`
 }
 
 export type SendText = (chatJid: string, text: string, options?: SendOptions) => Promise<void>
@@ -214,17 +231,18 @@ export function createMessageHandler({ config, tox, sendText, sendAudio, sendSti
                     // emoji takes the reaction off again (that is how !claude clears its ⏳ once the answer is sent).
                     await sendReaction(message.chatJid, reply.reaction, message.quoteRef)
                 }
+                const about = (kind: string) => describeMedia(kind, message.text, reply)
                 if (reply.audio) {
-                    await sendAudio(message.chatJid, await tox.fetchAudio(reply.audio), { quoteRef })
+                    await sendAudio(message.chatJid, await tox.fetchAudio(reply.audio), { quoteRef, about: about('audio') })
                 }
                 if (reply.sticker) {
-                    await sendSticker(message.chatJid, await tox.fetchSticker(reply.sticker), { quoteRef })
+                    await sendSticker(message.chatJid, await tox.fetchSticker(reply.sticker), { quoteRef, about: about('sticker') })
                 }
                 if (reply.image) {
-                    await sendImage(message.chatJid, await tox.fetchImage(reply.image), { quoteRef })
+                    await sendImage(message.chatJid, await tox.fetchImage(reply.image), { quoteRef, about: about('imagen') })
                 }
                 if (reply.video) {
-                    await sendVideo(message.chatJid, await tox.fetchVideo(reply.video), { quoteRef })
+                    await sendVideo(message.chatJid, await tox.fetchVideo(reply.video), { quoteRef, about: about('video') })
                 }
                 if (reply.text) {
                     const { text: body, mentionJids } = renderMentions(reply)

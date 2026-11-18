@@ -9,6 +9,7 @@ import { findBlacklisted, type SweepMember } from './blacklist.ts'
 import { createMessageHandler, renderMentions, stripDevice, type ChatMessage, type GroupMember, type HandlerLogger } from './messageHandler.ts'
 import { findPrivateLink } from './links.ts'
 import { createPairingController } from './pairing.ts'
+import { describeQuoted, rememberSent } from './sentMedia.ts'
 import { ToxClient } from './toxClient.ts'
 
 export interface BotOptions {
@@ -71,7 +72,8 @@ export function toChatMessage(event: WaIncomingMessageEvent): ChatMessage | null
     const { key } = event
     const source = imageSource(event.message, event)
     const context = event.message?.extendedTextMessage?.contextInfo
-    const quotedText = extractText(context?.quotedMessage)
+    // A picture or a voice note quotes no text: it says what it was instead, so the API knows what is being answered
+    const quotedText = extractText(context?.quotedMessage) || describeQuoted(context)
     return {
         chatJid: key.remoteJid,
         // In groups the sender is the participant; in 1:1 chats it is the chat itself.
@@ -86,7 +88,7 @@ export function toChatMessage(event: WaIncomingMessageEvent): ChatMessage | null
         ...(event.timestampSeconds ? { sentAtMs: event.timestampSeconds * 1000 } : {}),
         ...(key.remoteJidAlt && !key.isGroup ? { chatAltJid: key.remoteJidAlt } : {}),
         // A replied-to message with no text counts too (the bot's own voice notes): replying to one talks to the bot.
-        ...(context?.quotedMessage ? { quoted: { text: quotedText ?? '', senderJid: context.participant ?? undefined } } : {}),
+        ...(context?.quotedMessage ? { quoted: { text: quotedText, senderJid: context.participant ?? undefined } } : {}),
         quoteRef: event,
         ...(source ? { getImage: () => downloadImage(source) } : {})
     }
@@ -208,34 +210,38 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
             const credentials = client.getCredentials()
             return [credentials?.meJid, credentials?.meLid].filter((id): id is string => !!id)
         },
-        sendAudio: async (chatJid, { data, mimetype }, { quoteRef } = {}) => {
-            await client.message.send(
+        sendAudio: async (chatJid, { data, mimetype }, { quoteRef, about } = {}) => {
+            const sent = await client.message.send(
                 chatJid,
                 // Ogg/Opus is what WhatsApp shows as a voice note; m4a/mp3 go out as plain audio files.
                 { type: 'audio', media: data, mimetype, ptt: mimetype.includes('ogg') },
                 quoteRef ? { quote: quoteRef as WaIncomingMessageEvent } : undefined
             )
+            rememberSent(sent.id, about)
         },
-        sendSticker: async (chatJid, { data, mimetype }, { quoteRef } = {}) => {
-            await client.message.send(
+        sendSticker: async (chatJid, { data, mimetype }, { quoteRef, about } = {}) => {
+            const sent = await client.message.send(
                 chatJid,
                 { type: 'sticker', media: data, mimetype },
                 quoteRef ? { quote: quoteRef as WaIncomingMessageEvent } : undefined
             )
+            rememberSent(sent.id, about)
         },
-        sendImage: async (chatJid, { data, mimetype }, { quoteRef } = {}) => {
-            await client.message.send(
+        sendImage: async (chatJid, { data, mimetype }, { quoteRef, about } = {}) => {
+            const sent = await client.message.send(
                 chatJid,
                 { type: 'image', media: data, mimetype },
                 quoteRef ? { quote: quoteRef as WaIncomingMessageEvent } : undefined
             )
+            rememberSent(sent.id, about)
         },
-        sendVideo: async (chatJid, { data, mimetype }, { quoteRef } = {}) => {
-            await client.message.send(
+        sendVideo: async (chatJid, { data, mimetype }, { quoteRef, about } = {}) => {
+            const sent = await client.message.send(
                 chatJid,
                 { type: 'video', media: data, mimetype },
                 quoteRef ? { quote: quoteRef as WaIncomingMessageEvent } : undefined
             )
+            rememberSent(sent.id, about)
         },
         sendReaction: async (chatJid, emoji, target) => {
             await client.message.send(chatJid, { type: 'reaction', emoji, target: target as WaIncomingMessageEvent })
@@ -342,7 +348,9 @@ export function createBot(config: Config, logger: ConsoleLogger, options: BotOpt
                 if (alert.image) {
                     try {
                         const { data, mimetype } = await tox.fetchImage(alert.image)
-                        await client.message.send(alert.chat_id, { type: 'image', media: data, mimetype })
+                        const sent = await client.message.send(alert.chat_id, { type: 'image', media: data, mimetype })
+                        // The picture goes out alone, so its text is what a reply to it was about (the GTA countdown)
+                        rememberSent(sent.id, `imagen: "${alert.text}"`)
                         continue
                     } catch (error) {
                         // The API could not serve it, or WhatsApp refused it: the text says the same thing.
